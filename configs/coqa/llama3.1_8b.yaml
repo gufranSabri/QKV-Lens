@@ -1,0 +1,16 @@
+# coqa x meta-llama/Llama-3.1-8B   [QKV-Lens/HalluShift setting]
+# geometry: L=32  D_q=4096 D_kv=1024 -> 32x32 per view
+llm:
+  name: meta-llama/Llama-3.1-8B
+  alias: llama3.1_8b
+
+dataset:
+  name: coqa
+  n_samples: 10000
+  max_new_tokens: 64          # HalluShift: greedy, 64 new tokens
+  prompt_template: "Answer the question concisely based on the context: \n {story} \n Q: {question} A:"
+
+labeling:
+  scheme: bleurt              # HalluShift labels with BLEURT-20-D12
+  bleurt_threshold: 0.5       # hallucination = 1 if max BLEURT <= 0.5
+  bleurt_checkpoint: models/BLEURT-20-D12

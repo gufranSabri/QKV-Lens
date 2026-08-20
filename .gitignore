@@ -1,0 +1,42 @@
+# extracted features (huge)
+/data/
+# training outputs
+/runs/
+# downloaded model weights (e.g. BLEURT)
+/models/
+# generated experiment scripts
+/scripts/generated/
+# rendered figures (scripts/make_figures.py)
+/figs/
+/papers/
+# src-analysis: cached per-token CAM tables and rendered figures (huge,
+# fully regeneratable from a checkpoint + src-analysis/extract_cache.py) --
+# the analysis CODE itself is tracked, same precedent as /figs/ above.
+/src-analysis/cache/
+/src-analysis/figs/
+# assembled paper-writing folder (scripts/build_main_res.py) -- fully
+# regeneratable from /runs/ and /figs/, see docs/experiments_catalog.md
+/main-res/
+# all-experiments.sh progress logs
+/logs/
+
+/docs/*
+# ...except the hand-written experiment/figure/table catalog -- source, not
+# generated output (unlike docs/results.csv, which build_fusion's disabled
+# _save_to_results_csv would write and which stays ignored). A negated file
+# pattern under an ignored DIRECTORY has no effect unless the directory glob
+# itself allows git to descend into it -- "/docs/*" (not "/docs/") plus this
+# negation is the form that actually works.
+!/docs/experiments_catalog.md
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# OS
+.DS_Store
+
+CONTRIBUTING.md

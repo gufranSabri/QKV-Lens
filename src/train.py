@@ -1,0 +1,371 @@
+"""Training loop: train and evaluate the detector on one (dataset, LLM) source."""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+
+from src.config import Config
+from src.data.dataset import (
+    N_CHANNELS,
+    QKVFieldDataset,
+    _set_stats,
+    collate,
+    compute_stats,
+)
+from src.models.classifier import build_model
+from src.utils.logger import get_logger, setup_logging
+from src.utils.metrics import compute_metrics, format_metrics
+from src.utils.progress import progress
+from src.utils.seed import pick_device, seed_everything
+from src.utils.snapshot import snapshot_code
+from src.utils.splits import make_split
+
+logger = get_logger(__name__)
+
+
+def load_source(cfg: Config, dataset_name: str, llm_alias: str, **kw) -> QKVFieldDataset:
+    root = Path(cfg.data_root) / dataset_name / llm_alias
+    return QKVFieldDataset(
+        root,
+        max_tokens=cfg.extract.max_tokens,
+        origin=f"{llm_alias}/{dataset_name}",
+        **kw,
+    )
+
+
+def _unpack_batch(batch, device):
+    """Returns (model_args, labels, origins) where model_args is the exact
+    positional-arg tuple QKVHalluDetector.forward expects."""
+    images, labels, mask, origins = batch
+    images = images.to(device, non_blocking=True)
+    mask = mask.to(device, non_blocking=True)
+    return (images, mask), labels.to(device, non_blocking=True), origins
+
+
+def run_epoch(model, loader, criterion, device, optimizer=None, desc=""):
+    """One pass. Trains if `optimizer` is given, else evaluates.
+
+    Takes no scheduler: the LR schedule steps once per epoch, so the caller
+    drives it.
+    """
+    training = optimizer is not None
+    model.train(training)
+
+    total_loss, n_batches = 0.0, 0
+    all_y, all_p = [], []
+
+    with torch.set_grad_enabled(training):
+        for batch in progress(loader, desc=desc, leave=False, ncols=100):
+            model_args, labels, _origins = _unpack_batch(batch, device)
+
+            logits = model(*model_args)
+            loss = criterion(logits, labels)
+
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                # Exploding gradients through a BiLSTM are a classic failure here.
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+
+            total_loss += loss.item()
+            n_batches += 1
+            all_y.extend(labels.detach().cpu().numpy())
+            # Metrics need probabilities; the model emits raw logits.
+            all_p.extend(torch.sigmoid(logits).detach().cpu().numpy())
+
+    metrics = compute_metrics(all_y, all_p)
+    metrics["loss"] = total_loss / max(n_batches, 1)
+    return metrics
+
+
+def _section(title: str) -> None:
+    logger.info("")
+    logger.info("--- %s %s", title, "-" * max(0, 58 - len(title)))
+
+
+def log_run_header(cfg: Config, run_dir, device, dataset_name: str) -> None:
+    """Log what this run actually IS, before anything expensive happens."""
+    _section("run")
+    logger.info("run dir      : %s", run_dir)
+    logger.info("device       : %s", device)
+    logger.info("seed         : %d", cfg.train.seed)
+
+    _section("data")
+    logger.info("dataset      : %s", dataset_name)
+    logger.info("llm          : %s (%s)", cfg.llm.alias, cfg.llm.name)
+    logger.info("max_tokens   : %s | n_segments: %s | l_eff: %s",
+                cfg.extract.max_tokens, cfg.extract.n_segments, cfg.extract.l_eff)
+    logger.info("labeling     : %s", cfg.labeling.scheme)
+
+    _section("model")
+    logger.info("backbone     : %s (pretrained=%s)",
+                cfg.model.backbone,
+                cfg.model.pretrained_backbone if cfg.model.backbone == "resnet18" else "n/a")
+    logger.info("input        : 1 field per token x %d channels (Q, K, V), "
+                "(L, M) spatial -> temporal encoder", N_CHANNELS)
+    logger.info("embed_dim    : %d | dropout: %.3g", cfg.model.embed_dim, cfg.model.dropout)
+    logger.info("temporal     : conv1d x%d | bilstm hidden=%d x%d layer(s)",
+                cfg.model.conv1d_layers, cfg.model.lstm_hidden, cfg.model.lstm_layers)
+
+    _section("train")
+    logger.info("epochs       : %d | patience: %d | batch_size: %d",
+                cfg.train.epochs, cfg.train.patience, cfg.train.batch_size)
+    logger.info("lr           : %.3g | weight_decay: %.3g | backbone_lr_scale: %.3g",
+                cfg.train.lr, cfg.train.weight_decay, cfg.train.backbone_lr_scale)
+    logger.info("balance_class: %s | val_fraction: %.3g | test_fraction: %.3g",
+                cfg.train.balance_classes, cfg.train.val_fraction, cfg.train.test_fraction)
+
+
+def log_param_counts(model) -> None:
+    """Per-component parameter breakdown -- where the capacity actually is."""
+    groups = [
+        ("backbone", getattr(model, "backbone", None)),
+        ("temporal encoder", getattr(model, "temporal", None)),
+        ("head", getattr(model, "head", None)),
+    ]
+    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    for name, mod in groups:
+        if mod is None:
+            continue
+        n = sum(p.numel() for p in mod.parameters() if p.requires_grad)
+        logger.info("  %-22s %11s  (%4.1f%%)", name, f"{n:,}", 100 * n / max(total, 1))
+    logger.info("  %-22s %11s", "TOTAL trainable", f"{total:,}")
+
+
+def log_model_repr(model) -> None:
+    """The full module tree, exactly as PyTorch sees it.
+
+    Emitted line by line rather than as one blob: the log formatter prefixes
+    every record, so a single multi-line message would leave all but the first
+    line unprefixed and misaligned.
+    """
+    for line in repr(model).splitlines():
+        logger.info("  %s", line)
+
+
+def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
+    seed_everything(cfg.train.seed)
+    device = pick_device()
+
+    run_dir = Path(cfg.runs_root) / (run_name or default_run_name(cfg, dataset_name))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_code(run_dir)
+    setup_logging(log_file=run_dir / "train.log")
+
+    log_run_header(cfg, run_dir, device, dataset_name)
+
+    (run_dir / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
+
+    # ---- data ---------------------------------------------------------
+    full = load_source(cfg, dataset_name, cfg.llm.alias)
+    logger.info(
+        "source %-28s n=%-6d hallucination rate=%.1f%%",
+        full.origin, len(full), 100 * np.mean(full.labels),
+    )
+
+    # Every supported dataset is a single upstream split (see datasets.py
+    # SPLIT_SOURCES) -- a stratified test slice is always carved out of it.
+    logger.info(
+        "%s has no separate test corpus; carving out a %.0f%% stratified test slice",
+        dataset_name, 100 * cfg.train.test_fraction,
+    )
+
+    # HalluShift-style 2-way split: val and heldout are the SAME indices, so
+    # early stopping and the final reported metric both read the same slice.
+    train_idx, val_idx, heldout_idx = make_split(
+        full.labels,
+        val_fraction=cfg.train.val_fraction,
+        test_fraction=cfg.train.test_fraction,
+        seed=cfg.train.seed,
+        cache=run_dir / "split.json",
+    )
+    logger.info("split        : train %d | val/heldout %d", len(train_idx), len(val_idx))
+
+    geom = full.geometry
+    logger.info("field size   : %s rows (L) x %s segments (M)",
+                geom.get("n_rows", "?"), geom.get("n_segments", "?"))
+
+    _section("normalisation (train split only)")
+    # Normalisation statistics come from the TRAIN split only -- computing them
+    # over val/test would leak those distributions into the input scaling.
+    stats = compute_stats(full, train_idx)
+    (run_dir / "stats.json").write_text(json.dumps(stats, indent=2))
+    for proj, s in stats.items():
+        logger.info("norm %-3s: mean=%+.4f std=%.4f", proj, s["mean"], s["std"])
+
+    _set_stats(full, stats)
+
+    loader_kw = dict(
+        batch_size=cfg.train.batch_size,
+        collate_fn=collate,
+        num_workers=cfg.train.num_workers,
+        pin_memory=device.type == "cuda",
+    )
+    # drop_last on TRAIN only: BatchNorm1d in TemporalEncoder's conv stack
+    # can't compute a variance over a batch of size 1, which a trailing
+    # remainder batch hits whenever len(train_idx) % batch_size == 1. Val/test
+    # must never drop data -- that would silently shrink the reported metrics.
+    train_loader = DataLoader(
+        Subset(full, train_idx), shuffle=True, drop_last=True, **loader_kw
+    )
+    val_loader = DataLoader(Subset(full, val_idx), shuffle=False, **loader_kw)
+
+    # ---- model --------------------------------------------------------
+    model = build_model(cfg).to(device)
+
+    _section("architecture")
+    log_model_repr(model)
+
+    _section("parameters")
+    log_param_counts(model)
+
+    _section("optimisation")
+    # Class weighting: hallucination rates are typically far from 50/50, and an
+    # unweighted BCE will happily collapse to predicting the majority class.
+    pos_weight = None
+    if cfg.train.balance_classes:
+        y = np.asarray([full.labels[i] for i in train_idx])
+        n_pos, n_neg = int(y.sum()), int(len(y) - y.sum())
+        if n_pos > 0 and n_neg > 0:
+            # float32 explicitly: numpy's int division yields float64, which MPS
+            # refuses outright and which would silently upcast the loss on CUDA.
+            pos_weight = torch.tensor(
+                [n_neg / n_pos], dtype=torch.float32, device=device
+            )
+            logger.info("pos_weight = %.3f (neg=%d, pos=%d)", pos_weight.item(), n_neg, n_pos)
+
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    # Discriminative LR: the CNN backbone gets lr * backbone_lr_scale,
+    # everything else (temporal, head) gets the full lr. A pretrained backbone
+    # (scale < 1) wants a gentler LR than the randomly-initialised head, or it
+    # gets its ImageNet features wrecked before the head stabilises. scale ==
+    # 1.0 collapses to a single group -- correct for scratch / random-init.
+    scale = cfg.train.backbone_lr_scale
+    backbone_lr = cfg.train.lr * scale
+    if scale == 1.0:
+        param_groups = [{"params": model.parameters(), "lr": cfg.train.lr}]
+    else:
+        backbone_params = list(model.backbone.parameters())
+        backbone_ids = {id(p) for p in backbone_params}
+        other_params = [p for p in model.parameters() if id(p) not in backbone_ids]
+        param_groups = [
+            {"params": backbone_params, "lr": backbone_lr},
+            {"params": other_params, "lr": cfg.train.lr},
+        ]
+        logger.info(
+            "discriminative LR: backbone=%.2e, rest=%.2e (scale=%.3g)",
+            backbone_lr, cfg.train.lr, scale,
+        )
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.train.weight_decay)
+
+    # Linear decay (paper §5.3): hold the LR flat for the first
+    # `lr_decay_start` epochs, then ramp it linearly down to `lr_final_scale`
+    # of its initial value by the last epoch. LambdaLR multiplies each group's
+    # OWN initial LR by the same factor, so the backbone:head ratio set above
+    # holds for the entire run.
+    #
+    # Stepped once per EPOCH (not per batch), so it is deliberately not handed
+    # to run_epoch(). Note the slope is tied to `epochs`: if early stopping
+    # fires first, the LR simply never reaches the floor.
+    warm = cfg.train.lr_decay_start
+    final = cfg.train.lr_final_scale
+    total = cfg.train.epochs
+
+    def lr_lambda(epoch: int) -> float:      # epoch is 0-based
+        if epoch < warm:
+            return 1.0
+        # Guard the degenerate case where decay starts on/after the final epoch.
+        span = max(1, total - warm)
+        frac = min(1.0, (epoch - warm) / span)
+        return 1.0 + frac * (final - 1.0)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    logger.info(
+        "linear LR decay: flat for %d epochs, then -> %.3g x initial by epoch %d",
+        warm, final, total,
+    )
+
+    # ---- loop ---------------------------------------------------------
+    _section("training")
+    best_auroc, best_epoch, stale = -1.0, -1, 0
+    history = []
+
+    for epoch in range(1, cfg.train.epochs + 1):
+        t0 = time.time()
+        tr = run_epoch(model, train_loader, criterion, device,
+                       optimizer, desc=f"epoch {epoch} train")
+        va = run_epoch(model, val_loader, criterion, device,
+                       desc=f"epoch {epoch} val")
+
+        lrs = [g["lr"] for g in optimizer.param_groups]
+        logger.info("epoch %2d | train loss %.4f AUROC %.4f | val %s | lr %s | %.0fs",
+                    epoch, tr["loss"], tr["auroc"], format_metrics(va),
+                    " ".join(f"{lr:.2e}" for lr in lrs), time.time() - t0)
+
+        # Linear decay is a pure function of the epoch index -- no metric.
+        scheduler.step()
+
+        record = {"epoch": epoch, "train": tr, "val": va, "lr": lrs}
+
+        # Model selection on validation AUROC, never on test.
+        if va["auroc"] > best_auroc:
+            best_auroc, best_epoch, stale = va["auroc"], epoch, 0
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "config": cfg.to_dict(),
+                    "stats": stats,
+                    "epoch": epoch,
+                    "val_auroc": va["auroc"],
+                    # So test.py can tell an in-distribution eval (must be
+                    # restricted to heldout_idx) from a zero-shot one (evaluate
+                    # the whole corpus), and recover the exact held-out rows.
+                    "train_datasets": [dataset_name],
+                    "heldout_idx": heldout_idx,
+                    # Which LLM this checkpoint's data came from -- lets test.py
+                    # tell a same-dataset-different-LLM eval (which must NOT
+                    # reuse heldout_idx) apart from a genuine in-distribution one.
+                    "llm_alias": cfg.llm.alias,
+                },
+                run_dir / "best.pt",
+            )
+            logger.info("  new best (val AUROC %.4f) -> saved", best_auroc)
+        else:
+            stale += 1
+
+        history.append(record)
+        (run_dir / "history.json").write_text(json.dumps(history, indent=2))
+
+        if stale >= cfg.train.patience:
+            logger.info("early stopping: no val improvement for %d epochs", stale)
+            break
+
+    # ---- final evaluation with the BEST checkpoint ---------------------
+    _section("final evaluation")
+    logger.info("loading best checkpoint (epoch %d, val AUROC %.4f)", best_epoch, best_auroc)
+    ckpt = torch.load(run_dir / "best.pt", map_location=device, weights_only=False)
+    model.load_state_dict(ckpt["model"])
+
+    results = {"best_epoch": best_epoch, "val_auroc": best_auroc}
+
+    va = run_epoch(model, val_loader, criterion, device, desc="final val")
+    results["val"] = va
+    logger.info("FINAL val  | %s", format_metrics(va))
+
+    (run_dir / "results.json").write_text(json.dumps(results, indent=2))
+    logger.info("results written to %s", run_dir / "results.json")
+    return results
+
+
+def default_run_name(cfg: Config, dataset_name: str) -> str:
+    return f"{cfg.llm.alias}_{dataset_name}_{cfg.model.backbone}"

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(pdftotext -layout QKV_Lens.pdf /tmp/claude-3150329/-project-6101771-ahmedubc-QKV-Steer/e269883a-048e-42cf-92d1-0cd3b3a266ee/scratchpad/qkv_lens.txt)",
+      "Bash(pdftotext -layout MI_reference.pdf /tmp/claude-3150329/-project-6101771-ahmedubc-QKV-Steer/e269883a-048e-42cf-92d1-0cd3b3a266ee/scratchpad/mi_ref.txt)",
+      "Bash(python3 -)",
+      "Bash(python3 -c \"import torch, numpy, yaml, sklearn; print\\('torch', torch.__version__\\)\")",
+      "Bash(python3 main.py --config /tmp/tc.yaml train --run-name smoke)",
+      "Bash(wc -c /tmp/claude-3150329/-project-6101771-ahmedubc-QKV-Steer/f481013e-10de-468a-a113-86d130555a18/tasks/bbjwaijw4.output; ls -la /tmp/tmp3jbmecs2/runs/smoke/ 2>/dev/null; ps aux | grep -c \"[m]ain.py\")",
+      "Read(//tmp/tmp3jbmecs2/runs/smoke/**)",
+      "Bash(grep -v \"^$\" /tmp/tmp3jbmecs2/runs/smoke/train.log | tail -45)",
+      "Bash(rm -rf /tmp/tmp3jbmecs2 /tmp/tc.yaml; echo cleaned *)"
+    ],
+    "additionalDirectories": [
+      "/tmp/tmp3jbmecs2"
+    ]
+  }
+}

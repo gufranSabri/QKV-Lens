@@ -1,0 +1,58 @@
+# QKV-Steer defaults.
+#
+# The QKV-Lens method's own settings are FIXED IN CODE and are not keys here --
+# the (T, L, M, 3) field layout with Q/K/V on the channel axis, mean pooling,
+# and greedy decoding. See src/config.py's module docstring for the full list
+# and the reasoning. What remains below is what genuinely varies per run.
+
+llm:
+  name: meta-llama/Meta-Llama-3-8B-Instruct
+  dtype: bfloat16
+  alias: llama3_8b
+
+dataset:
+  name: triviaqa
+  n_samples: 10000
+  max_new_tokens: 64
+  prompt_template: "Answer the question concisely. Q: {question} A:"
+
+extract:
+  dtype: float16
+  max_tokens: 100
+  batch_size: 8 # examples generated together; purely a speed knob
+  n_segments: null # M. null -> use the model's layer count => SQUARE field
+  l_eff: null # null -> keep the model's L. Must stay null for steering.
+
+labeling:
+  scheme: bleurt # exact_match | bleurt
+  bleurt_threshold: 0.5 # hallucination = 1 if max BLEURT <= 0.5
+  bleurt_checkpoint: models/BLEURT-20-D12
+
+model:
+  backbone: scratch_cnn # scratch_cnn | resnet18
+  embed_dim: 2048 # E: CNN output per token
+  conv1d_layers: 2
+  lstm_hidden: 2048
+  lstm_layers: 1
+  dropout: 0.3
+  pretrained_backbone: true # only used by resnet18
+
+train:
+  batch_size: 8
+  lr: 0.0001
+  weight_decay: 0.0001
+  backbone_lr_scale: 0.1
+  lr_decay_start: 5
+  lr_final_scale: 0.0
+  epochs: 20
+  patience: 8
+  seed: 42
+  num_workers: 4
+  val_fraction: 0.25
+  test_fraction: 0.25
+  balance_classes: true
+
+# Set this to a QKV-Steer-specific path -- do NOT point it at the QKV-Lens
+# corpus: the on-disk field layout changed to (T, L, M, 3).
+data_root: /home/ahmedubc/scratch/QKV-Steer-data
+runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer

@@ -1,0 +1,20 @@
+# coqa x Qwen/Qwen2.5-7B   [QKV-Lens/HalluShift setting]
+llm:
+  name: Qwen/Qwen2.5-7B
+  alias: qwen2.5_7b
+
+extract:
+  # GQA: D_kv=512 isn't divisible by L=28, so the default (M=L) fails.
+  # 32 is the closest valid divisor of 512 -- and the paper's M.
+  n_segments: 32
+
+dataset:
+  name: coqa
+  n_samples: 10000
+  max_new_tokens: 64          # HalluShift: greedy, 64 new tokens
+  prompt_template: "Answer the question concisely based on the context: \n {story} \n Q: {question} A:"
+
+labeling:
+  scheme: bleurt              # HalluShift labels with BLEURT-20-D12
+  bleurt_threshold: 0.5       # hallucination = 1 if max BLEURT <= 0.5
+  bleurt_checkpoint: models/BLEURT-20-D12
