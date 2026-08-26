@@ -13,7 +13,7 @@ from pathlib import Path
 from src.config import REPO_ROOT
 
 #: Copied verbatim into every run's code/ snapshot.
-SNAPSHOT_PATHS = ("src", "main.py", "configs")
+SNAPSHOT_PATHS = ("src", "detector.py", "configs")
 
 _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
 

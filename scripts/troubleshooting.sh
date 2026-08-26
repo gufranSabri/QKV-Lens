@@ -30,7 +30,7 @@ source $SLURM_TMPDIR/env/bin/activate
 export PYTHONDONTWRITEBYTECODE=1
 export HF_HUB_DISABLE_XET=1
 export TF_CPP_MIN_LOG_LEVEL=3
-export HF_TOKEN=token
+export HF_TOKEN=REDACTED_HF_TOKEN
 export HF_HOME=/home/ahmedubc/scratch/hf_cache
 
 # Core deps only -- enough for the ACT-ViT comparison (exact_match labels):
@@ -62,10 +62,10 @@ RUN="${LLM}_${DATASET}"
 # QKV feature field. The expensive step -- one manual decode loop per batch of
 # examples. Restartable: finished examples are skipped.
 
-python main.py --config "$CONFIG" extract --set extract.batch_size=16
+python detector.py --config "$CONFIG" extract --set extract.batch_size=16
 
 # Split across jobs if needed (1-indexed blocks of 1000):
-# python main.py --config "$CONFIG" extract --chunk 1 --set extract.batch_size=16   # examples 0-999
+# python detector.py --config "$CONFIG" extract --chunk 1 --set extract.batch_size=16   # examples 0-999
 
 
 # ── STEP 3: INSPECT (do this before training, on day one) ──────────────────
@@ -73,26 +73,26 @@ python main.py --config "$CONFIG" extract --set extract.batch_size=16
 # near 1.0 they are redundant, and the three-channel field buys nothing over a
 # single projection.
 
-python main.py --config "$CONFIG" inspect --idx 0
+python detector.py --config "$CONFIG" inspect --idx 0
 
 
 # ── STEP 4: TRAIN ──────────────────────────────────────────────────────────
 
-python main.py --config "$CONFIG" train --run-name "$RUN"
+python detector.py --config "$CONFIG" train --run-name "$RUN"
 
 
 # ── STEP 5: TEST ───────────────────────────────────────────────────────────
 # Pass the plain dataset name. `test` evaluates the held-out slice carved out
 # at train time, and writes test_<dataset>.json next to the checkpoint.
 
-python main.py --config "$CONFIG" test --checkpoint "runs/$RUN/best.pt" --dataset "$DATASET"
+python detector.py --config "$CONFIG" test --checkpoint "runs/$RUN/best.pt" --dataset "$DATASET"
 
 
 # ── RELABEL (optional, free) ───────────────────────────────────────────────
 # meta.txt keeps each response + gold answer next to the tensor, so switching
 # labeling schemes never needs a re-extract.
 
-# python main.py --config "$CONFIG" label --set labeling.scheme=bleurt
+# python detector.py --config "$CONFIG" label --set labeling.scheme=bleurt
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -105,7 +105,7 @@ python main.py --config "$CONFIG" test --checkpoint "runs/$RUN/best.pt" --datase
 # bash all-datasets_run.sh            # train + test every (dataset x LLM)
 
 # As a batch job (sets up the env, then runs both of the above):
-# sbatch main.slurm
+# sbatch detector.slurm
 
 
 # ── UTILITIES ──────────────────────────────────────────────────────────────
@@ -114,3 +114,10 @@ python main.py --config "$CONFIG" test --checkpoint "runs/$RUN/best.pt" --datase
 # ls -lh runs/
 # cat runs/*/test_*.json
 # watch -n 2 'find "$DATA_ROOT" -name "tokens.npy" | wc -l'   # extraction progress
+
+
+
+python analysis/run_forecasting.py \
+  --config configs/triviaqa/llama2_7b.yaml \
+  --checkpoint runs/llama2_7b_triviaqa/best.pt \
+  --set data_root=/scratch/ahmedubc/delta-QKV-data

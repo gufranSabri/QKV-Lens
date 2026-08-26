@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 
 from src.config import Config
+from src.data import legacy
 from src.data.dataset import (
     N_CHANNELS,
     QKVFieldDataset,
@@ -31,7 +32,7 @@ logger = get_logger(__name__)
 
 
 def load_source(cfg: Config, dataset_name: str, llm_alias: str, **kw) -> QKVFieldDataset:
-    root = Path(cfg.data_root) / dataset_name / llm_alias
+    root = legacy.resolve_root(Path(cfg.data_root), dataset_name, llm_alias)
     return QKVFieldDataset(
         root,
         max_tokens=cfg.extract.max_tokens,

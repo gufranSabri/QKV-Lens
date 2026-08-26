@@ -40,3 +40,6 @@ __pycache__/
 .DS_Store
 
 CONTRIBUTING.md
+
+docs/
+bleurt/

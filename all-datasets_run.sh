@@ -10,16 +10,16 @@
 RERUN=${RERUN:-0}
 
 DATASETS=(
-    triviaqa
-    truthfulqa
+    # triviaqa
+    # truthfulqa
     coqa
 )
 
 MODELS=(
-    # llama2_7b
-    # llama3.1_8b
+    llama2_7b
+    llama3.1_8b
     qwen2.5_7b
-    # opt_6.7b
+    opt_6.7b
 )
 
 # run_train <run_name> [--set key=val ...]
@@ -29,7 +29,7 @@ run_train() {
         echo "  [skip] train runs/${run_name} (results.json already exists; RERUN=1 to force)"
         return
     fi
-    python main.py --config configs/$DATASET/$MODEL.yaml train --run-name "runs/${run_name}" "$@"
+    python detector.py --config configs/$DATASET/$MODEL.yaml train --run-name "runs/${run_name}" "$@"
 }
 
 # run_test <run_name> [--set key=val ...]
@@ -40,7 +40,7 @@ run_test() {
         echo "  [skip] test runs/${run_name} ($dest already exists; RERUN=1 to force)"
         return
     fi
-    python main.py --config configs/$DATASET/$MODEL.yaml test --checkpoint "runs/${run_name}/best.pt" --dataset $DATASET "$@"
+    python detector.py --config configs/$DATASET/$MODEL.yaml test --checkpoint "runs/${run_name}/best.pt" --dataset $DATASET "$@"
 }
 
 for DATASET in "${DATASETS[@]}"; do

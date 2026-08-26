@@ -28,7 +28,7 @@ for DATASET in "${DATASETS[@]}"; do
         echo "Model:   $MODEL"
         echo "========================================"
 
-        python main.py --config configs/$DATASET/$MODEL.yaml extract \
+        python detector.py --config configs/$DATASET/$MODEL.yaml extract \
             --set extract.batch_size=8
     done
 done

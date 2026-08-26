@@ -54,5 +54,8 @@ train:
 
 # Set this to a QKV-Steer-specific path -- do NOT point it at the QKV-Lens
 # corpus: the on-disk field layout changed to (T, L, M, 3).
-data_root: /home/ahmedubc/scratch/QKV-Steer-data
+# data_root: /home/ahmedubc/scratch/QKV-Steer-data
+# runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer
+
+data_root: /scratch/ahmedubc/QKV-Steer-data
 runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer

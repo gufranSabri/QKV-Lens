@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""QKV-Steer: causal intervention on pre-attention Q/K/V projections.
+"""Detector CLI: build QKV feature fields and train the hallucination detector.
 
-Phase 1 (this CLI) is the LOCALIZE half, inherited from QKV-Lens: build the
-per-token QKV feature field, train a hallucination detector on it, and attribute
-its predictions back onto the field.
+This is the LOCALIZE half of QKV-Steer, inherited from QKV-Lens. It is a
+SUPPORTING tool, not the project's headline: the detector exists to supply
+f_theta and its Grad-CAM attribution to the steering stage, which is where the
+actual contribution lives. Nothing here intervenes on the LLM -- every
+subcommand below only reads activations and fits a classifier over them.
+
+Steering entry points are separate and will not live in this file.
 
 Subcommands:
     extract   generate responses, capture Q/K/V, build and save feature fields
@@ -60,8 +64,8 @@ def _overrides(args) -> dict:
 def main(argv=None) -> int:
     # --config and --set are declared on a shared parent parser AND inherited by
     # every subcommand, so they work on either side of the subcommand name:
-    #     main.py --config c.yaml train --set train.epochs=30
-    #     main.py train --config c.yaml --set train.epochs=30
+    #     detector.py --config c.yaml train --set train.epochs=30
+    #     detector.py train --config c.yaml --set train.epochs=30
     # argparse otherwise binds a top-level flag only before the subcommand, which
     # is a trap: the natural `train --set ...` ordering would just error out.
     common = argparse.ArgumentParser(add_help=False)
@@ -72,7 +76,7 @@ def main(argv=None) -> int:
              "--set extract.n_segments=64",
     )
     parser = argparse.ArgumentParser(
-        prog="QKV-Steer",
+        prog="detector.py",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[common],

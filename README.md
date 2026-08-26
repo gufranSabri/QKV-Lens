@@ -22,6 +22,25 @@ place: `src/extract/qkv_hooks.get_projection` addresses the exact module the
 read path hooks, and `src/cam.attribution_field` returns attribution in the
 field's own `(token, layer, segment)` coordinates.
 
+## Repo layout
+
+`detector.py` is the CLI for the **detector stage only** — extract, label,
+train, test, inspect, cam. It is named for what it is rather than `main.py`,
+because it is a supporting tool: it fits `f_theta` and produces the attribution
+that the steering stage consumes. The steering entry point will be a separate
+top-level script, not another subcommand here.
+
+```
+detector.py          detector-stage CLI (extract / train / test / cam / ...)
+detector.slurm       batch job for that pipeline
+src/extract/         generation, Q/K/V capture, feature-field construction
+src/models/          the detector: CNN -> Conv1d -> BiLSTM -> head
+src/data/            field dataset, normalisation, QKV-Lens corpus reader
+src/cam.py           Grad-CAM attribution over the field
+configs/             one config per (dataset, LLM)
+docs/plan.md         the research plan
+```
+
 ## The feature field
 
 Each generated token becomes one `L x M x 3` image (QKV-Lens Algorithm 1):
@@ -58,20 +77,28 @@ Configs that use a removed QKV-Lens option fail loudly with the reason
 ## Usage
 
 ```bash
-python main.py --config configs/triviaqa/llama2_7b.yaml extract
-python main.py --config configs/triviaqa/llama2_7b.yaml train --run-name my_run
-python main.py --config configs/triviaqa/llama2_7b.yaml test  --checkpoint runs/my_run/best.pt
-python main.py --config configs/triviaqa/llama2_7b.yaml cam    --checkpoint runs/my_run/best.pt --idx 0
-python main.py --config configs/triviaqa/llama2_7b.yaml inspect --idx 0
+python detector.py --config configs/triviaqa/llama2_7b.yaml extract
+python detector.py --config configs/triviaqa/llama2_7b.yaml train --run-name my_run
+python detector.py --config configs/triviaqa/llama2_7b.yaml test  --checkpoint runs/my_run/best.pt
+python detector.py --config configs/triviaqa/llama2_7b.yaml cam    --checkpoint runs/my_run/best.pt --idx 0
+python detector.py --config configs/triviaqa/llama2_7b.yaml inspect --idx 0
 ```
 
 `--set key=value` overrides any config key from the command line, on either side
 of the subcommand.
 
-Set `data_root` in `configs/default.yaml` before extracting. **Do not point it at
-the QKV-Lens corpus** — the on-disk layout changed to `(T, L, M, 3)`.
+Set `data_root` in `configs/default.yaml` before extracting.
 
-On-disk layout, one tree per `(dataset, LLM)`:
+**A QKV-Lens corpus is read directly — no re-extraction.** Point `data_root` at
+one and it is detected from its `geometry.json` and converted on read: its
+channel 0 *is* the mean-pooled activation Algorithm 1 defines, so
+`old[..., 0]` with the view axis moved last recovers the field exactly. The
+extra channels (DWT, or layer deltas) are derived quantities this method does
+not use. A corpus pooled any other way is rejected rather than reinterpreted
+(`src/data/legacy.py`). The old `{source}/{extraction_type}/` nesting is
+resolved automatically; a native corpus always wins over a legacy one.
+
+On-disk layout for a **new** extraction, one tree per `(dataset, LLM)`:
 
 ```
 {data_root}/{dataset}/{llm_alias}/
@@ -87,7 +114,7 @@ TriviaQA, TruthfulQA, CoQA × LLaMA-2-7B, LLaMA-3.1-8B, OPT-6.7B, Qwen2.5-7B —
 the 12 settings from QKV-Lens, one config each under `configs/`.
 
 Labels follow HalluShift: max BLEURT-20-D12 against the gold references,
-thresholded at 0.5. `python main.py ... label` recomputes labels from stored
+thresholded at 0.5. `python detector.py ... label` recomputes labels from stored
 responses without re-running the LLM.
 
 Qwen2.5-7B needs `extract.n_segments: 32` set explicitly — its `L=28` does not
@@ -100,4 +127,4 @@ bash scripts/install.sh --bleurt     # --bleurt pulls the TF BLEURT scorer
 ```
 
 `scripts/troubleshooting.sh` is the annotated step-by-step version of the whole
-pipeline; `main.slurm` runs it as a batch job.
+pipeline; `detector.slurm` runs it as a batch job.

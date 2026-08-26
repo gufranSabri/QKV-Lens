@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from src.config import Config
+from src.data import legacy
 from src.extract.run_extraction import parse_meta
 from src.extract.tensor_ops import PROJECTIONS
 from src.utils.logger import get_logger
@@ -24,7 +25,7 @@ logger = get_logger(__name__)
 
 
 def inspect(cfg: Config, idx: int = 0, n_tokens: int = 4, out: str | None = None) -> None:
-    root = cfg.example_dir()
+    root = legacy.resolve_root(Path(cfg.data_root), cfg.dataset.name, cfg.llm.alias)
     ex_dir = root / f"{idx:05d}"
     tokens_path = ex_dir / "tokens.npy"
     if not tokens_path.exists():
@@ -33,7 +34,16 @@ def inspect(cfg: Config, idx: int = 0, n_tokens: int = 4, out: str | None = None
     geometry_path = root / "geometry.json"
     geometry = json.loads(geometry_path.read_text()) if geometry_path.exists() else {}
 
-    field = np.load(tokens_path).astype(np.float32)   # (T, L, M, 3)
+    arr = np.load(tokens_path)
+    if legacy.is_legacy_geometry(geometry):
+        # A QKV-Lens corpus stores (T, V, L, M, C); convert to the (T, L, M, 3)
+        # field so every figure and statistic below reads the same layout a
+        # fresh extraction would produce.
+        legacy.assert_compatible(geometry, root)
+        logger.info("%s", legacy.describe(geometry))
+        field = legacy.to_field(arr).numpy()
+    else:
+        field = arr.astype(np.float32)                # (T, L, M, 3)
     meta = parse_meta(ex_dir / "meta.txt")
 
     print(f"\nexample {idx}  ({ex_dir})")

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from src.data import legacy
 from src.extract.tensor_ops import PROJECTIONS
 from src.utils.logger import get_logger
 
@@ -37,7 +38,7 @@ class QKVFieldDataset(Dataset):
         manifest = self.root / "manifest.jsonl"
         if not manifest.exists():
             raise FileNotFoundError(
-                f"no manifest at {manifest}. Run `python main.py extract` first."
+                f"no manifest at {manifest}. Run `python detector.py extract` first."
             )
 
         geometry_path = self.root / "geometry.json"
@@ -55,8 +56,31 @@ class QKVFieldDataset(Dataset):
         if unlabeled:
             raise ValueError(
                 f"{len(unlabeled)} examples in {self.root} have no valid label. "
-                "Run `python main.py label` to (re)label them."
+                "Run `python detector.py label` to (re)label them."
             )
+
+        # A run-on response truncated at the very first token (the "Q:" turn
+        # marker appeared with no real answer before it) leaves n_tokens == 0:
+        # no rows in tokens.npy, so an all-False mask reaches the model and
+        # temporal.py raises. Drop those here, before any split/stats/loader
+        # code sees them, rather than padding around a token axis of length 0.
+        empty = [r for r in self.records if r.get("n_tokens", 0) == 0]
+        if empty:
+            logger.warning(
+                "%s: dropping %d example(s) with n_tokens == 0 (empty after "
+                "run-on truncation): idx=%s",
+                self.root, len(empty), [r["idx"] for r in empty],
+            )
+            self.records = [r for r in self.records if r.get("n_tokens", 0) > 0]
+
+        # A QKV-Lens-era corpus stores a wider tensor built the same way; it is
+        # converted on read rather than re-extracted. Validated ONCE here, at
+        # construction, so an incompatible corpus fails before any training
+        # starts instead of partway through the first epoch.
+        self.legacy = legacy.is_legacy_geometry(self.geometry)
+        if self.legacy:
+            legacy.assert_compatible(self.geometry, self.root)
+            logger.info("%s: %s", self.root, legacy.describe(self.geometry))
 
         self.stats = stats
         self.max_tokens = max_tokens
@@ -71,12 +95,20 @@ class QKVFieldDataset(Dataset):
 
     def _load_raw(self, i) -> torch.Tensor:
         """(T, L, M, 3) for example i, un-normalised. This is the layout the
-        normalisation stats are computed and applied over."""
+        normalisation stats are computed and applied over.
+
+        Every tensor enters the pipeline here, so converting a legacy corpus at
+        this single point covers `__getitem__` and `compute_stats` alike -- the
+        rest of the codebase never sees the QKV-Lens layout.
+        """
         rec = self.records[i]
         path = self.root / rec["dir"] / "tokens.npy"
 
-        arr = np.load(path)                       # (T, L, M, 3) fp16
-        field = torch.from_numpy(np.ascontiguousarray(arr)).float()
+        arr = np.load(path)
+        if self.legacy:
+            field = legacy.to_field(arr)          # (T, V, L, M, C) -> (T, L, M, 3)
+        else:
+            field = torch.from_numpy(np.ascontiguousarray(arr)).float()
 
         if self.max_tokens is not None and field.shape[0] > self.max_tokens:
             field = field[: self.max_tokens]

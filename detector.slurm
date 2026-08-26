@@ -1,5 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=QKV-Steer
+# Batch job for the DETECTOR stage (extract + train + test). This fits f_theta,
+# which the steering stage then consumes; it does not steer anything itself.
+#SBATCH --job-name=qkv-detector
 #SBATCH --output=slurm/%x.%j.out
 #SBATCH --error=slurm/%x.%j.err
 #SBATCH --open-mode=append
@@ -28,10 +30,3 @@ bash scripts/install.sh --bleurt || exit 1
 
 bash all-datasets_extract.sh
 bash all-datasets_run.sh
-
-
-
-# I'm done now with the main results ig
-# i now need to run experiments to support the ablation and the discussion
-
-# i want to do analysis on what the heatmaps say ab
