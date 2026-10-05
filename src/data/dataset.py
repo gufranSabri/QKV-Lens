@@ -35,9 +35,12 @@ class QKVFieldDataset(Dataset):
         origin: str | None = None,
         keep_channels: list[str] | None = None,
         token_buckets: int | None = None,
+        layer_permute_seed: int | None = None,
     ):
         self.keep_channels = keep_channels
         self.token_buckets = token_buckets
+        self.layer_permute_seed = layer_permute_seed
+        self._layer_perm: torch.Tensor | None = None  # built lazily, see _finish
         self.root = Path(root)
         manifest = self.root / "manifest.jsonl"
         if not manifest.exists():
@@ -123,7 +126,7 @@ class QKVFieldDataset(Dataset):
         return field
 
     def _finish(self, raw: torch.Tensor) -> torch.Tensor:
-        """normalise -> zero unwanted channels -> move channels into conv position."""
+        """normalise -> zero unwanted channels -> permute layers -> conv position."""
         field = raw
         if self.stats is not None:
             field = normalize(field, self.stats)
@@ -131,8 +134,24 @@ class QKVFieldDataset(Dataset):
         if self.keep_channels is not None:
             field = zero_channels(field, self.keep_channels)
 
+        if self.layer_permute_seed is not None:
+            field = self._permuted_layers(field)
+
         # (T, L, M, 3) -> (T, 3, L, M): channels into conv position.
         return field.permute(0, 3, 1, 2).contiguous()
+
+    def _permuted_layers(self, field: torch.Tensor) -> torch.Tensor:
+        """Reorder the LAYER axis (dim 1) with ONE fixed permutation, built on
+        first use and reused for every example and every epoch, train and test
+        alike -- a per-call random shuffle would let the model see every true
+        layer-adjacency relationship anyway (just relabelled per batch), which
+        defeats the ablation's whole point (see ModelConfig.layer_permute_seed).
+        """
+        n_layers = field.shape[1]
+        if self._layer_perm is None or self._layer_perm.shape[0] != n_layers:
+            gen = torch.Generator().manual_seed(self.layer_permute_seed)
+            self._layer_perm = torch.randperm(n_layers, generator=gen)
+        return field[:, self._layer_perm]
 
     def __getitem__(self, i):
         rec = self.records[i]

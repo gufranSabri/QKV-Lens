@@ -132,7 +132,7 @@ def load_detector(cfg: Config, checkpoint: str | Path, device) -> tuple[torch.nn
         raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 
-    model = build_model(cfg).to(device)
+    model = build_model(cfg, field_shape=ckpt.get("field_shape")).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     return model, ckpt

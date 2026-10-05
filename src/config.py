@@ -44,7 +44,10 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
-VALID_BACKBONES = ("scratch_cnn", "resnet18")
+#: "flat_mlp" is the structure-preservation ablation's control backbone (see
+#: src/models/backbones/flat_mlp.py) -- same per-token parameter budget as
+#: scratch_cnn, but flattens (L, M) before the first learned weight.
+VALID_BACKBONES = ("scratch_cnn", "resnet18", "flat_mlp")
 VALID_SCHEMES = ("exact_match", "bleurt")
 
 #: Per-model n_segments that is CANONICAL for that model -- i.e. baked into
@@ -157,6 +160,18 @@ class ModelConfig:
     # (layer, segment, projection) coordinate means, only how many token
     # positions the temporal encoder sees.
     token_buckets: int | None = None
+    # Structure-preservation ablation (control #2): permute the LAYER axis with
+    # a FIXED pseudo-random permutation, seeded by this value, applied to every
+    # example (train and test alike) and computed once per dataset load -- not
+    # re-drawn per example, or the model could not learn any layer-order
+    # regularity at all, defeating the point of the control. `null` (default)
+    # keeps the true layer order. If structured (correctly-ordered) beats this
+    # at otherwise-identical capacity, cross-layer adjacency/order itself is
+    # informative, not just "the detector sees every layer". Ablation-only, like
+    # `keep_channels`/`token_buckets`: ANY non-null value breaks the
+    # (layer, segment, projection) coordinate correspondence the steering stage
+    # depends on, so this must stay null outside this one ablation.
+    layer_permute_seed: int | None = None
 
 
 @dataclass
@@ -295,6 +310,8 @@ class Config:
                 )
         if m.token_buckets is not None and m.token_buckets < 1:
             raise ValueError("model.token_buckets must be >= 1 or null")
+        if m.layer_permute_seed is not None and m.layer_permute_seed < 0:
+            raise ValueError("model.layer_permute_seed must be >= 0 or null")
 
         if la.scheme not in VALID_SCHEMES:
             raise ValueError(f"labeling.scheme must be one of {VALID_SCHEMES}")

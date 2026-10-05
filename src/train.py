@@ -49,6 +49,7 @@ def load_source(cfg: Config, dataset_name: str, llm_alias: str, **kw) -> QKVFiel
         origin=f"{llm_alias}/{dataset_name}",
         keep_channels=cfg.model.keep_channels,
         token_buckets=cfg.model.token_buckets,
+        layer_permute_seed=cfg.model.layer_permute_seed,
         **kw,
     )
 
@@ -127,6 +128,11 @@ def log_run_header(cfg: Config, run_dir, device, dataset_name: str) -> None:
     logger.info("embed_dim    : %d | dropout: %.3g", cfg.model.embed_dim, cfg.model.dropout)
     logger.info("temporal     : conv1d x%d | bilstm hidden=%d x%d layer(s)",
                 cfg.model.conv1d_layers, cfg.model.lstm_hidden, cfg.model.lstm_layers)
+    if cfg.model.layer_permute_seed is not None:
+        logger.info(
+            "ABLATION     : layer order permuted, seed=%d (structure-preservation control)",
+            cfg.model.layer_permute_seed,
+        )
 
     _section("train")
     logger.info("epochs       : %d | patience: %d | batch_size: %d",
@@ -203,8 +209,8 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     logger.info("split        : train %d | val/heldout %d", len(train_idx), len(val_idx))
 
     geom = full.geometry
-    logger.info("field size   : %s rows (L) x %s segments (M)",
-                geom.get("n_rows", "?"), geom.get("n_segments", "?"))
+    n_rows, n_segments = geom.get("n_rows"), geom.get("n_segments")
+    logger.info("field size   : %s rows (L) x %s segments (M)", n_rows, n_segments)
 
     _section("normalisation (train split only)")
     # Normalisation statistics come from the TRAIN split only -- computing them
@@ -232,7 +238,8 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     val_loader = DataLoader(Subset(full, val_idx), shuffle=False, **loader_kw)
 
     # ---- model --------------------------------------------------------
-    model = build_model(cfg).to(device)
+    field_shape = (n_rows, n_segments) if n_rows and n_segments else None
+    model = build_model(cfg, field_shape=field_shape).to(device)
 
     _section("architecture")
     log_model_repr(model)
@@ -349,6 +356,11 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
                     # tell a same-dataset-different-LLM eval (which must NOT
                     # reuse heldout_idx) apart from a genuine in-distribution one.
                     "llm_alias": cfg.llm.alias,
+                    # (n_rows, n_segments) the model was built for -- test.py and
+                    # cam.py have no dataset in scope at load_state_dict time, so
+                    # a shape-dependent backbone (e.g. flat_mlp) needs this to
+                    # reconstruct an identically-shaped model before loading.
+                    "field_shape": field_shape,
                 },
                 run_dir / "best.pt",
             )

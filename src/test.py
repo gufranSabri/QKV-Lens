@@ -51,6 +51,20 @@ def test(
                  f"to llm={cfg.llm.alias!r}'s activations",
         )
 
+    # layer_permute_seed changes what INPUT the model was trained to read --
+    # unlike a wrong backbone choice, which fails to load_state_dict, a
+    # mismatched (or missing) permutation here loads fine and just silently
+    # evaluates the model on a different layer ordering than it was trained
+    # on, undermining the whole point of this ablation.
+    ckpt_seed = (ckpt.get("config") or {}).get("model", {}).get("layer_permute_seed")
+    if ckpt_seed != cfg.model.layer_permute_seed:
+        logger.warning(
+            "layer_permute_seed mismatch: checkpoint was trained with %r, this "
+            "eval config has %r. Pass --set model.layer_permute_seed=%r to "
+            "match the checkpoint, or this result is not a faithful eval of it.",
+            ckpt_seed, cfg.model.layer_permute_seed, ckpt_seed,
+        )
+
     name = dataset_name or cfg.dataset.name
     name, eval_set = _resolve_eval_target(name, ckpt, cfg.llm.alias)
 
@@ -90,7 +104,7 @@ def test(
         pin_memory=device.type == "cuda",
     )
 
-    model = build_model(cfg).to(device)
+    model = build_model(cfg, field_shape=ckpt.get("field_shape")).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

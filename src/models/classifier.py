@@ -26,11 +26,11 @@ class QKVHalluDetector(nn.Module):
     Output: (B,) logits -- raw, NOT sigmoided (we use BCEWithLogits).
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, field_shape: tuple[int, int] | None = None):
         super().__init__()
         self.cfg = cfg
 
-        self.backbone = build_backbone(cfg)
+        self.backbone = build_backbone(cfg, field_shape=field_shape)
         self.temporal = TemporalEncoder(
             input_dim=cfg.model.embed_dim,
             conv_layers=cfg.model.conv1d_layers,
@@ -65,5 +65,9 @@ class QKVHalluDetector(nn.Module):
         return self.head(combined).squeeze(-1)                      # (B,)
 
 
-def build_model(cfg) -> QKVHalluDetector:
-    return QKVHalluDetector(cfg)
+def build_model(cfg, field_shape: tuple[int, int] | None = None) -> QKVHalluDetector:
+    """field_shape = (n_rows, n_segments), i.e. the field's (L, M). Only
+    required when cfg.model.backbone needs it to fix its own shape before
+    `load_state_dict` can run -- see build_backbone's `_NEEDS_FIELD_SHAPE`.
+    """
+    return QKVHalluDetector(cfg, field_shape=field_shape)

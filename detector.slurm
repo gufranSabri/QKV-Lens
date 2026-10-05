@@ -29,5 +29,37 @@ export HF_HOME=/home/ahmedubc/scratch/hf_cache
 
 bash scripts/install.sh --bleurt --baselines || exit 1
 
-bash all-datasets_extract.sh
-bash all-datasets_run.sh
+# bash all-datasets_extract.sh
+# bash all-datasets_run.sh
+
+
+
+
+
+# LLaMA-3.1-8B
+python detector.py --config configs/triviaqa/llama3.1_8b.yaml train --run-name flatmlp_llama3.1_8b_triviaqa --set model.backbone=flat_mlp
+python detector.py --config configs/triviaqa/llama3.1_8b.yaml test --checkpoint runs/flatmlp_llama3.1_8b_triviaqa/best.pt --dataset triviaqa --set model.backbone=flat_mlp
+
+# OPT-6.7B
+python detector.py --config configs/triviaqa/opt_6.7b.yaml train --run-name flatmlp_opt_6.7b_triviaqa --set model.backbone=flat_mlp
+python detector.py --config configs/triviaqa/opt_6.7b.yaml test --checkpoint runs/flatmlp_opt_6.7b_triviaqa/best.pt --dataset triviaqa --set model.backbone=flat_mlp
+
+# Qwen2.5-7B
+python detector.py --config configs/triviaqa/qwen2.5_7b.yaml train --run-name flatmlp_qwen2.5_7b_triviaqa --set model.backbone=flat_mlp
+python detector.py --config configs/triviaqa/qwen2.5_7b.yaml test --checkpoint runs/flatmlp_qwen2.5_7b_triviaqa/best.pt --dataset triviaqa --set model.backbone=flat_mlp
+
+
+
+# ------------------------------------------------------------------------------------------
+
+# LLaMA-3.1-8B
+python detector.py --config configs/triviaqa/llama3.1_8b.yaml train --run-name permL42_llama3.1_8b_triviaqa --set model.layer_permute_seed=42
+python detector.py --config configs/triviaqa/llama3.1_8b.yaml test --checkpoint runs/permL42_llama3.1_8b_triviaqa/best.pt --dataset triviaqa --set model.layer_permute_seed=42
+
+# OPT-6.7B
+python detector.py --config configs/triviaqa/opt_6.7b.yaml train --run-name permL42_opt_6.7b_triviaqa --set model.layer_permute_seed=42
+python detector.py --config configs/triviaqa/opt_6.7b.yaml test --checkpoint runs/permL42_opt_6.7b_triviaqa/best.pt --dataset triviaqa --set model.layer_permute_seed=42
+
+# Qwen2.5-7B
+python detector.py --config configs/triviaqa/qwen2.5_7b.yaml train --run-name permL42_qwen2.5_7b_triviaqa --set model.layer_permute_seed=42
+python detector.py --config configs/triviaqa/qwen2.5_7b.yaml test --checkpoint runs/permL42_qwen2.5_7b_triviaqa/best.pt --dataset triviaqa --set model.layer_permute_seed=42
