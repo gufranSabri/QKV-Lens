@@ -44,11 +44,18 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
-#: "flat_mlp" is the structure-preservation ablation's control backbone (see
-#: src/models/backbones/flat_mlp.py) -- same per-token parameter budget as
-#: scratch_cnn, but flattens (L, M) before the first learned weight.
-VALID_BACKBONES = ("scratch_cnn", "resnet18", "flat_mlp")
+#: "flat_mlp" is the main approach; "scratch_cnn" (BAFE, the original QKV-Lens
+#: CNN) is the structure-preservation ablation's "with spatial structure" arm
+#: -- see src/models/backbones/flat_mlp.py's docstring.
+VALID_BACKBONES = ("flat_mlp", "scratch_cnn")
 VALID_SCHEMES = ("exact_match", "bleurt")
+#: extract.source: which field train/test/cam/forecasting load -- "qkv" (the
+#: paper's (T,L,M,3) field) or "hidden-states" ((T,L,M,1), the representation
+#: ablation's QKV alternative). See ExtractConfig.source's docstring.
+VALID_SOURCES = ("qkv", "hidden-states")
+#: model.collapse_axis: which field axis the feature-pooling ablation
+#: collapses by averaging -- see ModelConfig.collapse_axis's docstring.
+VALID_COLLAPSE_AXES = ("M", "L", "channels")
 
 #: Per-model n_segments that is CANONICAL for that model -- i.e. baked into
 #: its own configs/{dataset}/{alias}.yaml for a structural reason, not an
@@ -86,13 +93,13 @@ class DatasetConfig:
 
 @dataclass
 class ExtractConfig:
-    """How the (T, L, M, 3) feature field is built and stored.
+    """How the feature field is built and stored.
 
-    There is exactly one thing to extract now -- the paper's QKV field. The old
-    `source` (qkv|hs) and `extraction_type` (delta|transforms) selectors are
-    gone: hidden states were a QKV-Lens ablation baseline (Table 4's HS column,
-    which lost to QKV on all four models), and the delta/DWT channel variants
-    competed for the same channel axis that the paper reserves for Q/K/V.
+    `extraction_type` (delta|transforms) stays gone -- those DWT/delta channel
+    variants competed for the same channel axis Q/K/V occupies, with no way to
+    coexist with it. `source` is back (QKV-Lens removed it as a settled
+    question: hidden states lost to QKV in that paper's Table 4), reopened by
+    the structure-preservation pivot -- see `source`'s own docstring below.
     """
 
     dtype: str = "float16"
@@ -117,6 +124,17 @@ class ExtractConfig:
     # it can never silently overwrite the canonical mean-pooled corpus a
     # trained checkpoint or steering run depends on.
     pool: str = "mean"
+    # Which field the REPRESENTATION-ablation TRAIN/TEST side reads: "qkv"
+    # (default, the paper's (T,L,M,3) field) or "hidden-states" (a (T,L,M,1)
+    # field of decoder hidden states -- see
+    # src/extract/run_extraction.run_hidden_states_extraction). NOT read by
+    # `extract` itself -- extraction always writes the QKV field; a
+    # hidden-states corpus is produced by `extract-hidden-states`
+    # (detector.py), a SEPARATE command, into its own data_root subtree, and
+    # never overwrites or is read in place of the QKV corpus. This key only
+    # tells `train`/`test`/`cam`/forecasting which of the two ALREADY-WRITTEN
+    # trees to load from (see src/train.py load_source's `source` argument).
+    source: str = "qkv"
 
 
 @dataclass
@@ -137,13 +155,12 @@ class ModelConfig:
     code. See src/models/ for what the detector is now.
     """
 
-    backbone: str = "scratch_cnn"
-    embed_dim: int = 2048       # E: CNN output per token
+    backbone: str = "flat_mlp"
+    embed_dim: int = 2048       # E: backbone output per token
     conv1d_layers: int = 2
     lstm_hidden: int = 2048
     lstm_layers: int = 1
     dropout: float = 0.3
-    pretrained_backbone: bool = True   # only meaningful for resnet18
     # Which of the field's 3 fixed channels (Q, K, V) actually reach the
     # detector, e.g. ["Q"] or ["Q", "V"]. `null` (default) keeps all three.
     # The FIELD is unchanged either way -- (T, L, M, 3) is still what gets
@@ -172,6 +189,20 @@ class ModelConfig:
     # (layer, segment, projection) coordinate correspondence the steering stage
     # depends on, so this must stay null outside this one ablation.
     layer_permute_seed: int | None = None
+    # Feature-pooling ablation: collapse ONE field axis to size 1 by averaging
+    # over it, at data-loading time -- "vector aggregation", the compressed
+    # alternative the paper's related work argues the 2D/3-channel field
+    # avoids. One of "M" (segments -> (T,L,1,3): keep depth + projection,
+    # lose feature resolution), "L" (layers -> (T,1,M,3): keep feature
+    # resolution + projection, lose depth -- this is literally "pool the
+    # whole field to one vector per projection", the paper's own phrase for
+    # the alternative it argues against), "channels" (Q/K/V -> (T,L,M,1):
+    # keep depth + feature resolution, lose projection identity -- the
+    # single-channel case this shares machinery with hidden-states over, see
+    # QKVFieldDataset.n_channels). `null` (default) collapses nothing.
+    # Mutually exclusive with layer_permute_seed (collapsing L makes
+    # permuting it meaningless) -- see the validator.
+    collapse_axis: str | None = None
 
 
 @dataclass
@@ -283,6 +314,8 @@ class Config:
 
         if e.pool not in POOL_MODES:
             raise ValueError(f"extract.pool must be one of {POOL_MODES}, got {e.pool!r}")
+        if e.source not in VALID_SOURCES:
+            raise ValueError(f"extract.source must be one of {VALID_SOURCES}, got {e.source!r}")
 
         if m.backbone not in VALID_BACKBONES:
             raise ValueError(
@@ -312,6 +345,23 @@ class Config:
             raise ValueError("model.token_buckets must be >= 1 or null")
         if m.layer_permute_seed is not None and m.layer_permute_seed < 0:
             raise ValueError("model.layer_permute_seed must be >= 0 or null")
+        if m.collapse_axis is not None and m.collapse_axis not in VALID_COLLAPSE_AXES:
+            raise ValueError(
+                f"model.collapse_axis must be one of {VALID_COLLAPSE_AXES} or null, "
+                f"got {m.collapse_axis!r}"
+            )
+        if m.collapse_axis == "L" and m.layer_permute_seed is not None:
+            raise ValueError(
+                "model.collapse_axis='L' and model.layer_permute_seed are "
+                "mutually exclusive: collapsing the layer axis to size 1 "
+                "leaves nothing for a layer-order permutation to reorder."
+            )
+        if m.collapse_axis == "channels" and m.keep_channels is not None:
+            raise ValueError(
+                "model.collapse_axis='channels' and model.keep_channels are "
+                "mutually exclusive: averaging Q/K/V into one channel leaves "
+                "nothing for a per-projection keep-list to select."
+            )
 
         if la.scheme not in VALID_SCHEMES:
             raise ValueError(f"labeling.scheme must be one of {VALID_SCHEMES}")
@@ -362,7 +412,6 @@ _SECTIONS = {
 #: config or shell script, and silently ignoring them would let a run proceed
 #: under settings the user believes are in effect.
 _REMOVED_KEYS: dict[str, str] = {
-    "extract.source": "hidden states were a QKV-Lens ablation baseline; only the QKV field remains",
     "extract.extraction_type": "delta/transform channels competed for the channel axis, which now holds Q/K/V",
     "extract.views": "Q, K and V are always all three, as the field's channel axis",
     "extract.boundary_mode": "only meaningful for the removed delta channels",

@@ -15,8 +15,21 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-#: Channels per token image: Q, K, V. Fixed by the feature-field layout.
+#: Channels per token image for the MAIN (QKV) field. Fixed by the paper's
+#: feature-field layout. A hidden-states field (see
+#: src.extract.tensor_ops.build_hidden_states_field) has 1 channel instead --
+#: QKVFieldDataset reads its OWN corpus's actual channel count from
+#: geometry.json at construction time (self.n_channels) rather than assuming
+#: this module constant; N_CHANNELS itself remains the right default/fallback
+#: for the common QKV case and for anything that builds a QKV-shaped tensor
+#: directly (e.g. figure scripts that only ever run on QKV corpora).
 N_CHANNELS = len(PROJECTIONS)
+
+#: The stats-dict key for a hidden-states field's one channel -- matches
+#: geometry["projections"] = ["H"] (see tensor_ops.build_hidden_states_field),
+#: so compute_stats/normalize key their dict the same way regardless of which
+#: kind of corpus they're given.
+HIDDEN_STATE_CHANNELS = ("H",)
 
 
 class QKVFieldDataset(Dataset):
@@ -36,10 +49,12 @@ class QKVFieldDataset(Dataset):
         keep_channels: list[str] | None = None,
         token_buckets: int | None = None,
         layer_permute_seed: int | None = None,
+        collapse_axis: str | None = None,
     ):
         self.keep_channels = keep_channels
         self.token_buckets = token_buckets
         self.layer_permute_seed = layer_permute_seed
+        self.collapse_axis = collapse_axis
         self._layer_perm: torch.Tensor | None = None  # built lazily, see _finish
         self.root = Path(root)
         manifest = self.root / "manifest.jsonl"
@@ -52,6 +67,25 @@ class QKVFieldDataset(Dataset):
         self.geometry = (
             json.loads(geometry_path.read_text()) if geometry_path.exists() else {}
         )
+        # Channel count for THIS corpus, read from its own geometry.json
+        # rather than assumed to be N_CHANNELS (3): a hidden-states corpus
+        # (src.extract.tensor_ops.build_hidden_states_field) writes
+        # geometry["projections"] = ["H"], one generic channel, not Q/K/V.
+        # Missing/legacy geometry defaults to the QKV case (N_CHANNELS),
+        # matching every corpus that predates this field existing at all.
+        projections = self.geometry.get("projections")
+        # n_channels_on_disk: what's actually stored in tokens.npy, and what
+        # `normalize` must standardise over -- per-projection normalisation
+        # (see `normalize`'s docstring) has to run BEFORE any channel
+        # collapse, or whichever raw projection has the largest magnitude
+        # would dominate the average instead of each contributing on a
+        # comparable, already-standardised scale. n_channels is the count
+        # AFTER collapse_axis='channels' (if set) -- what the MODEL actually
+        # sees and what build_model's in_ch must match -- so the two differ
+        # exactly when that ablation is active.
+        self.n_channels_on_disk = len(projections) if projections else N_CHANNELS
+        self.is_hidden_states = self.n_channels_on_disk == 1
+        self.n_channels = 1 if self.collapse_axis == "channels" else self.n_channels_on_disk
 
         self.records = []
         with open(manifest) as f:
@@ -126,18 +160,30 @@ class QKVFieldDataset(Dataset):
         return field
 
     def _finish(self, raw: torch.Tensor) -> torch.Tensor:
-        """normalise -> zero unwanted channels -> permute layers -> conv position."""
+        """normalise -> zero unwanted channels -> collapse an axis -> permute layers -> conv position."""
         field = raw
         if self.stats is not None:
-            field = normalize(field, self.stats)
+            # n_channels_on_disk, not n_channels: standardise over the REAL
+            # stored channels (3 for QKV), before any collapse_axis='channels'
+            # averaging -- see n_channels_on_disk's docstring above.
+            field = normalize(field, self.stats, n_channels=self.n_channels_on_disk)
 
         if self.keep_channels is not None:
+            if self.is_hidden_states:
+                raise ValueError(
+                    "model.keep_channels is a Q/K/V-projection ablation and has "
+                    "no meaning on a hidden-states corpus (1 channel, not "
+                    "named Q/K/V) -- unset it for this data_root."
+                )
             field = zero_channels(field, self.keep_channels)
+
+        if self.collapse_axis is not None:
+            field = collapse_axis_mean(field, self.collapse_axis)
 
         if self.layer_permute_seed is not None:
             field = self._permuted_layers(field)
 
-        # (T, L, M, 3) -> (T, 3, L, M): channels into conv position.
+        # (T, L, M, C) -> (T, C, L, M): channels into conv position.
         return field.permute(0, 3, 1, 2).contiguous()
 
     def _permuted_layers(self, field: torch.Tensor) -> torch.Tensor:
@@ -175,6 +221,25 @@ def zero_channels(field: torch.Tensor, keep: list[str]) -> torch.Tensor:
     return field * mask
 
 
+def collapse_axis_mean(field: torch.Tensor, axis: str) -> torch.Tensor:
+    """Feature-pooling ablation: average ONE field axis down to size 1 --
+    "vector aggregation", the compressed alternative the paper's related work
+    argues the structured field avoids (see ModelConfig.collapse_axis).
+
+    field: (T, L, M, C). Applied AFTER normalisation and keep_channels (see
+    _finish) so this ablation only decides what shape reaches the backbone,
+    never skews the statistics the rest of the field is standardised against.
+
+    Returns (T, 1, M, C) for axis="L", (T, L, 1, C) for axis="M", or
+    (T, L, M, 1) for axis="channels" -- the axis is kept at size 1, not
+    squeezed away, so the field stays rank-4 and every OTHER caller (the
+    (T, C, L, M) permute right after this, the backbone's field_shape/in_ch)
+    sees an ordinary (if degenerate) field rather than a special case.
+    """
+    dim = {"L": 1, "M": 2, "channels": 3}[axis]
+    return field.mean(dim=dim, keepdim=True)
+
+
 def bucket_pool_tokens(field: torch.Tensor, n_buckets: int) -> torch.Tensor:
     """Mean-pool the TOKEN axis (dim 0) down to `n_buckets` contiguous groups.
 
@@ -196,22 +261,29 @@ def bucket_pool_tokens(field: torch.Tensor, n_buckets: int) -> torch.Tensor:
     )
 
 
-def normalize(field: torch.Tensor, stats: dict) -> torch.Tensor:
-    """Standardise PER PROJECTION (Q, K, V separately).
+def normalize(field: torch.Tensor, stats: dict, n_channels: int = N_CHANNELS) -> torch.Tensor:
+    """Standardise PER CHANNEL (Q, K, V separately for a QKV field; the one
+    channel's own stats for a hidden-states field).
 
     A single global statistic would be wrong: Q, K and V have very different
     magnitudes -- under GQA they are pooled from different-width vectors -- so
     whichever projection happens to have the largest scale would dominate the
-    shared conv filters before the detector ever got a say.
+    shared conv filters before the detector ever got a say. (A hidden-states
+    field has only one channel, so this degenerates to ordinary
+    standardisation there -- the per-channel machinery still applies, just
+    with one channel instead of three.)
 
-    field: (T, L, M, 3)
+    field: (T, L, M, n_channels). `stats` is keyed by channel name
+    (PROJECTIONS for QKV, or HIDDEN_STATE_CHANNELS for hidden states) --
+    whichever `compute_stats` was given when it built this dict.
     """
+    names = PROJECTIONS if n_channels == N_CHANNELS else HIDDEN_STATE_CHANNELS
     mean = torch.tensor(
-        [stats[p]["mean"] for p in PROJECTIONS], dtype=field.dtype
-    ).view(1, 1, 1, N_CHANNELS)
+        [stats[p]["mean"] for p in names], dtype=field.dtype
+    ).view(1, 1, 1, n_channels)
     std = torch.tensor(
-        [stats[p]["std"] for p in PROJECTIONS], dtype=field.dtype
-    ).view(1, 1, 1, N_CHANNELS)
+        [stats[p]["std"] for p in names], dtype=field.dtype
+    ).view(1, 1, 1, n_channels)
     return (field - mean) / std.clamp(min=1e-6)
 
 
@@ -220,23 +292,29 @@ def _set_stats(dataset, stats) -> None:
 
 
 def compute_stats(dataset, indices: list[int], max_examples: int = 500) -> dict:
-    """Per-projection mean/std over a sample of the TRAINING split only.
+    """Per-channel mean/std over a sample of the TRAINING split only.
 
     Computed on train indices exclusively -- using val/test examples here would
-    leak their distribution into the model's input scaling.
+    leak their distribution into the model's input scaling. Reads the
+    dataset's OWN channel count/names (set at construction from its
+    geometry.json), so this works unmodified for both a QKV corpus (3 named
+    channels) and a hidden-states corpus (1).
     """
+    n_channels = getattr(dataset, "n_channels", N_CHANNELS)
+    names = PROJECTIONS if n_channels == N_CHANNELS else HIDDEN_STATE_CHANNELS
+
     # Welford would be tidier, but a two-pass over a bounded sample is simpler
     # and plenty accurate for a normalisation constant.
-    sums = torch.zeros(N_CHANNELS, dtype=torch.float64)
-    sqs = torch.zeros(N_CHANNELS, dtype=torch.float64)
-    count = torch.zeros(N_CHANNELS, dtype=torch.float64)
+    sums = torch.zeros(n_channels, dtype=torch.float64)
+    sqs = torch.zeros(n_channels, dtype=torch.float64)
+    count = torch.zeros(n_channels, dtype=torch.float64)
 
     sample = indices[:max_examples]
     logger.info("computing normalisation stats over %d training examples", len(sample))
 
-    # Read RAW values via _load_raw -- (T, L, M, 3), before normalisation.
+    # Read RAW values via _load_raw -- (T, L, M, n_channels), before normalisation.
     for i in sample:
-        x = dataset._load_raw(i).double()         # (T, L, M, 3)
+        x = dataset._load_raw(i).double()         # (T, L, M, n_channels)
         sums += x.sum(dim=(0, 1, 2))
         sqs += (x**2).sum(dim=(0, 1, 2))
         count += x.shape[0] * x.shape[1] * x.shape[2]
@@ -247,7 +325,7 @@ def compute_stats(dataset, indices: list[int], max_examples: int = 500) -> dict:
 
     return {
         p: {"mean": float(mean[k]), "std": float(max(std[k].item(), 1e-6))}
-        for k, p in enumerate(PROJECTIONS)
+        for k, p in enumerate(names)
     }
 
 

@@ -3,9 +3,9 @@
 
 This is the LOCALIZE half of QKV-Steer, inherited from QKV-Lens. It is a
 SUPPORTING tool, not the project's headline: the detector exists to supply
-f_theta and its Grad-CAM attribution to the steering stage, which is where the
-actual contribution lives. Nothing here intervenes on the LLM -- every
-subcommand below only reads activations and fits a classifier over them.
+f_theta and its Integrated Gradients attribution to the steering stage, which
+is where the actual contribution lives. Nothing here intervenes on the LLM --
+every subcommand below only reads activations and fits a classifier over them.
 
 Steering entry points are separate and will not live in this file.
 
@@ -15,7 +15,7 @@ Subcommands:
     train     train the detector on one dataset
     test      evaluate a saved checkpoint
     inspect   render feature fields to PNG so you can actually look at them
-    cam       Grad-CAM/Eigen-CAM: where the detector looks, per token
+    cam       Integrated Gradients: where the detector looks, per token
 """
 
 from __future__ import annotations
@@ -99,6 +99,14 @@ def main(argv=None) -> int:
              "haloscope's own script for its separate beam-search generation.",
     )
 
+    p_exhs = sub.add_parser(
+        "extract-hidden-states", parents=[common],
+        help="generate + capture hidden states + save (T,L,M,1) feature fields "
+             "(the representation ablation's QKV alternative)",
+    )
+    p_exhs.add_argument("--overwrite", action="store_true",
+                        help="re-extract examples that already have tokens.npy")
+
     sub.add_parser("label", parents=[common],
                    help="recompute labels from stored responses")
 
@@ -128,12 +136,12 @@ def main(argv=None) -> int:
 
     p_cam = sub.add_parser(
         "cam", parents=[common],
-        help="Grad-CAM/Eigen-CAM: where the detector looks, per token",
+        help="Integrated Gradients: where the detector looks, per token",
     )
     p_cam.add_argument("--checkpoint", required=True)
     p_cam.add_argument("--dataset", default=None, help="defaults to the config's dataset")
     p_cam.add_argument("--idx", type=int, default=0, help="example index")
-    p_cam.add_argument("--method", choices=["gradcam", "eigencam"], default="gradcam")
+    p_cam.add_argument("--method", choices=["ig"], default="ig")
     p_cam.add_argument(
         "--max-tokens", type=int, default=20,
         help="cap on generated-token columns shown (0 or negative = show all)",
@@ -169,6 +177,11 @@ def main(argv=None) -> int:
         if unknown:
             parser.error(f"--methods: unknown method(s) {sorted(unknown)}; known: {KNOWN_METHODS}")
         run_extraction(cfg, chunk=args.chunk, overwrite=args.overwrite, methods=methods)
+
+    elif args.cmd == "extract-hidden-states":
+        from src.extract.run_extraction import run_hidden_states_extraction
+
+        run_hidden_states_extraction(cfg, overwrite=args.overwrite)
 
     elif args.cmd == "label":
         from src.extract.run_extraction import relabel

@@ -65,7 +65,13 @@ from src.config import Config
 from src.extract.datasets import load_examples
 from src.extract.hallushift_features import build_hallushift_row
 from src.extract.qkv_hooks import VIEWS, capture_all, left_pad_batch, read_geometry
-from src.extract.tensor_ops import PROJECTIONS, build_feature_field, pool_layer_axis
+from src.extract.tensor_ops import (
+    PROJECTIONS,
+    build_feature_field,
+    build_hidden_states_field,
+    pool_layer_axis,
+    stack_hidden_states,
+)
 from src.label.registry import label_examples
 from src.utils.logger import get_logger
 from src.utils.progress import progress
@@ -77,7 +83,11 @@ DTYPES = {"float16": torch.float16, "float32": torch.float32, "bfloat16": torch.
 #: Methods this extraction loop can feed directly from its own shared
 #: generation. "haloscope" is a recognised name (accepted by --methods so a
 #: single flag can request it) but is handled by its own separate script --
-#: see the module docstring.
+#: see the module docstring. "hidden-states" is NOT in this list -- see
+#: run_hidden_states_extraction, its own separate, isolated extraction path
+#: (it needs no QKV field and has no reason to share this function's
+#: resume/skip state machine, which is already dense enough with just
+#: qkv-steer + hallushift).
 KNOWN_METHODS = ("qkv-steer", "hallushift", "haloscope")
 SHARED_GENERATION_METHODS = ("qkv-steer", "hallushift")
 
@@ -241,6 +251,16 @@ def hallushift_dir(cfg: Config) -> Path:
     field, and scripts/reproducing_baselines/hallushift's training code (run via
     scripts/run_training.py) only needs to know this one path convention."""
     return Path(cfg.data_root) / "hallushift" / cfg.dataset.name / cfg.llm.alias
+
+
+def hidden_states_dir(cfg: Config) -> Path:
+    """{data_root}/hidden_states/{dataset}/{llm_alias}/ -- sibling to the QKV
+    tree, in the SAME manifest/geometry/tokens.npy layout QKVFieldDataset
+    already reads (see build_hidden_states_field) -- the representation
+    ablation's hidden-states row is just this path pointed at by
+    cfg.dataset_dir_for instead of the canonical QKV path, not a different
+    loader."""
+    return Path(cfg.data_root) / "hidden_states" / cfg.dataset.name / cfg.llm.alias
 
 
 def load_hallushift_rows(path: Path) -> dict[int, list]:
@@ -733,6 +753,220 @@ def run_extraction(
             "consider a harder dataset.",
             100 * min(n_hall, len(records) - n_hall) / len(records),
         )
+
+
+def run_hidden_states_extraction(cfg: Config, overwrite: bool = False) -> None:
+    """Generate responses and write a (T, L, M, 1) hidden-states field --
+    the representation ablation's alternative to the (T, L, M, 3) QKV field.
+
+    DELIBERATELY SEPARATE from run_extraction(): this writes to its own tree
+    (hidden_states_dir, a sibling of the QKV tree and of hallushift_dir) and
+    has no chunking, no --methods, and no shared-generation-with-hallushift
+    state machine -- run_extraction's resume/skip logic is already dense
+    with just qkv-steer + hallushift, and hidden-states doesn't need to
+    share a generation call with either (it has its own complete,
+    independent tree either way, so there is nothing to gain by threading a
+    third case through that function's existing checks -- only risk to the
+    two paths already used for real extracted data).
+
+    Resume behaviour: matches run_extraction's own three-way partition --
+    complete (tensor + resolved label: skip entirely), generated-but-
+    unlabeled (tensor + response on disk, label still -1: REUSE the tensor,
+    skip the LLM, just re-label it), and to_generate (needs the model). The
+    middle case is not a rare edge case here: an interrupted multi-hour run
+    over a 10k-example dataset (TriviaQA) leaves exactly this state for
+    every example it got through before stopping -- labeling only happens
+    once, in one batch, at the very end (see below) -- so without this path
+    a second invocation would re-run the LLM on every already-generated
+    example, discarding real GPU time already spent (observed: a run
+    interrupted at 277/9960 examples restarted generation at 0/9960).
+    """
+    root = hidden_states_dir(cfg)
+    root.mkdir(parents=True, exist_ok=True)
+
+    if not overwrite and (root / "manifest.jsonl").exists():
+        logger.info(
+            "%s/%s: hidden-states manifest.jsonl already exists -- skipping "
+            "(use --overwrite to redo)",
+            cfg.dataset.name, cfg.llm.alias,
+        )
+        return
+
+    examples = load_examples(cfg)
+    logger.info("loaded %d examples for %s", len(examples), cfg.dataset.name)
+
+    reused: list[dict] = []
+    to_generate = []
+    skipped = 0
+    for ex in examples:
+        ex_dir = root / f"{ex.idx:05d}"
+        if not overwrite and is_complete(ex_dir):
+            skipped += 1
+        elif not overwrite and is_generated(ex_dir):
+            reused.append(_record_from_meta(ex_dir, ex.idx))
+        else:
+            to_generate.append(ex)
+    if skipped:
+        logger.info("skipped %d already-complete examples (use --overwrite to redo)", skipped)
+    if reused:
+        logger.info(
+            "reusing %d already-generated (but unlabeled) examples: no re-generation",
+            len(reused),
+        )
+
+    records: list[dict] = list(reused)
+
+    if not to_generate:
+        if not reused:
+            logger.info("nothing to generate for hidden-states")
+            return
+        logger.info("nothing to generate; going straight to labeling + manifest")
+        _label_and_write_manifest(cfg, root, records)
+        return
+
+    # capture_generate_outputs needs eager attention + batch_size=1, exactly
+    # like hallushift's requirement in run_extraction -- see capture_all's
+    # docstring for why (output_attentions is requested too, unused here but
+    # inseparable from the single capture_generate_outputs flag; the extra
+    # cost is accepted rather than adding a narrower hidden-states-only
+    # capture mode to qkv_hooks.py for this one caller).
+    model, tokenizer = load_llm(cfg, require_eager_attention=True)
+    geom = read_geometry(model)
+    device = next(model.parameters()).device
+    logger.info("model geometry: %s", geom)
+
+    stop_ids = resolve_stop_tokens(tokenizer, model)
+    logger.info("stop tokens: %s (%s)", stop_ids, [tokenizer.decode([i]) for i in stop_ids])
+    if not stop_ids:
+        logger.warning(
+            "no stop tokens found: every response will run to max_new_tokens=%d",
+            cfg.dataset.max_new_tokens,
+        )
+
+    n_segments = cfg.extract.n_segments or geom.n_layers
+    # Hidden states are the model's full hidden_size (no GQA-style width
+    # split the way Q vs K/V has) -- checked directly against hidden_size
+    # rather than through check_n_segments (which checks d_q/d_kv; those
+    # happen to equal hidden_size here, but checking the actual captured
+    # tensor's own width is correct regardless of whether that holds).
+    if geom.hidden_size % n_segments != 0:
+        raise ValueError(
+            f"n_segments={n_segments} does not evenly divide hidden_size="
+            f"{geom.hidden_size}. Set extract.n_segments to a divisor of "
+            f"{geom.hidden_size} (e.g. one close to {n_segments})."
+        )
+    n_rows = cfg.extract.l_eff or geom.n_layers
+    logger.info(
+        "hidden-states field shape per token: %d layers x %d segments x 1 channel",
+        n_rows, n_segments,
+    )
+
+    (root / "geometry.json").write_text(
+        json.dumps(
+            {
+                "llm": cfg.llm.name,
+                "geometry": asdict(geom),
+                "n_segments": n_segments,
+                "n_rows": n_rows,
+                # ONE generic channel, not Q/K/V -- see
+                # src/data/dataset.py's HIDDEN_STATE_CHANNELS / n_channels.
+                "projections": ["H"],
+                "pool": cfg.extract.pool,
+            },
+            indent=2,
+        )
+    )
+
+    save_dtype = DTYPES[cfg.extract.dtype]
+    pad_id = tokenizer.eos_token_id or tokenizer.pad_token_id
+    if pad_id is None:
+        raise ValueError(
+            f"{cfg.llm.name} has neither eos_token_id nor pad_token_id; "
+            "cannot left-pad a batch."
+        )
+
+    progress_log = (root / "progress.log").open("a")
+    total_to_generate = len(to_generate)
+    n_done = 0
+
+    for ex in progress(
+        to_generate, desc=f"extract(hidden-states) {cfg.dataset.name}/{cfg.llm.alias}",
+        ncols=100,
+    ):
+        input_ids = build_prompt_ids(ex.prompt, tokenizer, device)
+        # batch_size forced to 1 (see require_eager_attention/capture_all's
+        # docstring), so no left_pad_batch needed -- a single unpadded row.
+        (row_out,) = capture_all(
+            model, input_ids, max_new_tokens=cfg.dataset.max_new_tokens,
+            eos_token_id=stop_ids, capture_generate_outputs=True,
+        )
+        _activations, gen_ids, generate_outputs = row_out
+        n_done += 1
+
+        if gen_ids.numel() == 0:
+            logger.warning("example %d generated nothing; skipping", ex.idx)
+            continue
+
+        # Same truncate-then-slice-generate_outputs pattern as run_extraction
+        # -- see its inline comment for why this ordering matters.
+        kept_ids, response = truncate_runon(gen_ids, tokenizer)
+        n_keep = kept_ids.shape[0]
+        hidden = generate_outputs["hidden_states"]
+        if n_keep < gen_ids.shape[0]:
+            hidden = hidden[:n_keep]
+        if cfg.extract.max_tokens and len(hidden) > cfg.extract.max_tokens:
+            hidden = hidden[: cfg.extract.max_tokens]
+
+        hidden_tlD = stack_hidden_states(hidden)  # (T, L, D)
+        field = build_hidden_states_field(hidden_tlD, n_segments=n_segments, pool=cfg.extract.pool)
+        if cfg.extract.l_eff is not None:
+            field = pool_layer_axis(field, cfg.extract.l_eff)
+
+        write_example(
+            root / f"{ex.idx:05d}", field, ex.prompt, response, ex.gold,
+            score=float("nan"), label=-1, save_dtype=save_dtype,
+        )
+        records.append({
+            "idx": ex.idx, "dir": f"{ex.idx:05d}", "n_tokens": int(field.shape[0]),
+            "prompt": ex.prompt, "response": response, "gold": ex.gold,
+        })
+
+        if n_done % 100 == 0 or n_done == total_to_generate:
+            progress_log.write(f"{n_done}/{total_to_generate}\n")
+            progress_log.flush()
+
+    progress_log.close()
+
+    _label_and_write_manifest(cfg, root, records)
+
+
+def _label_and_write_manifest(cfg: Config, root: Path, records: list[dict]) -> None:
+    """Shared tail of run_hidden_states_extraction: label every record (both
+    freshly-generated and reused-but-unlabeled ones are mixed into `records`
+    identically -- labeling can't tell them apart, nor does it need to) and
+    write the manifest. Factored out so the "nothing left to generate, only
+    reused examples need labeling" early-return path and the normal
+    post-generation path run the exact same labeling/manifest logic.
+    """
+    if not records:
+        logger.warning("no new examples extracted")
+        return
+
+    logger.info("labeling %d examples with scheme=%s", len(records), cfg.labeling.scheme)
+    scored = label_examples(cfg, [r["response"] for r in records], [r["gold"] for r in records])
+    for rec, (score, label) in zip(records, scored):
+        rec["score"], rec["label"] = score, label
+        (root / rec["dir"] / "meta.txt").write_text(
+            format_meta(rec["prompt"], rec["response"], rec["gold"], score, label),
+            encoding="utf-8",
+        )
+
+    write_manifest(root, records, chunk=None)
+    n_hall = sum(r["label"] for r in records)
+    logger.info(
+        "done (hidden-states): %d examples, %d hallucinated (%.1f%%)",
+        len(records), n_hall, 100 * n_hall / len(records),
+    )
 
 
 def write_manifest(root: Path, new_records: list[dict], chunk: int | None) -> None:

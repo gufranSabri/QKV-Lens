@@ -3,17 +3,26 @@
 
     python scripts/analysis/run_all.py                  # every run under runs/
     python scripts/analysis/run_all.py llama2_7b_coqa   # just this one
+    python scripts/analysis/run_all.py llama2_7b_triviaqa llama3.1_8b_triviaqa \
+        opt_6.7b_triviaqa qwen2.5_7b_triviaqa            # an explicit subset
     python scripts/analysis/run_all.py --limit 0        # the full held-out split
     python scripts/analysis/run_all.py --from-cache     # redraw, no GPU needed
 
 This is the entry point that produces the paper figure. It sweeps every
-(LLM, dataset) cell, writes each cell's own figure and report, and then pools
-them into:
+requested (LLM, dataset) cell (default: every run under runs/), writes each
+cell's own figure and report, and then pools them into:
 
     docs/figures/forecasting/forecasting_summary.png (+ .pdf)
     docs/tables/forecasting/forecasting_summary.csv
     docs/tables/forecasting/forecasting_curves.csv
     docs/reports/forecasting/report.md
+
+When every swept cell shares one dataset (e.g. the 4 canonical TriviaQA runs
+above), ALSO writes docs/figures/forecasting/forecasting_by_model.png (+.pdf)
+-- one AUROC-vs-prefix line per model, since with only as many cells as
+models, which model a line belongs to IS the comparison (see
+forecasting_report.fig_summary_by_model's docstring for why this differs
+from the pooled-band design of the main summary figure).
 
 For each run directory the (dataset, LLM) config is reconstructed from that
 run's own saved `config.json` -- not by parsing the run-name string -- so it is
@@ -80,8 +89,11 @@ def main(argv=None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        "run_name", nargs="?", default=None,
-        help="only analyze runs/<run_name> (default: every run under --runs-root)",
+        "run_name", nargs="*", default=None,
+        help="only analyze these runs/<run_name>(s) (default: every run under "
+             "--runs-root) -- e.g. the 4 canonical {llm_alias}_triviaqa runs, "
+             "to skip the ablation run dirs (repr_*, collapse_*, struct_*, "
+             "...) that also live under --runs-root.",
     )
     p.add_argument("--runs-root", default="runs", help="default: runs")
     p.add_argument(
@@ -102,9 +114,10 @@ def main(argv=None) -> int:
     docs.mkdirs()
 
     if args.run_name:
-        run_dirs = [runs_root / args.run_name]
-        if not run_dirs[0].is_dir():
-            raise SystemExit(f"no such run: {run_dirs[0]}")
+        run_dirs = [runs_root / name for name in args.run_name]
+        missing = [d for d in run_dirs if not d.is_dir()]
+        if missing:
+            raise SystemExit(f"no such run(s): {missing}")
     else:
         run_dirs = discover_runs(runs_root)
 

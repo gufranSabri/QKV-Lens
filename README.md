@@ -8,7 +8,7 @@ Detection*. The research plan lives in [docs/plan.md](docs/plan.md).
 Two-pass inference over a frozen LLM and a frozen QKV-Lens detector:
 
 1. **Locate** — generate once, extract the QKV feature field, run the detector,
-   compute Grad-CAM attribution over the field.
+   compute Integrated Gradients attribution over the field.
 2. **Steer** — re-run generation with the pre-attention Q/K/V projections
    perturbed according to that attribution.
 
@@ -34,9 +34,10 @@ top-level script, not another subcommand here.
 detector.py          detector-stage CLI (extract / train / test / cam / ...)
 detector.slurm       batch job for that pipeline
 src/extract/         generation, Q/K/V capture, feature-field construction
-src/models/          the detector: CNN -> Conv1d -> BiLSTM -> head
+src/models/          the detector: backbone -> Conv1d -> BiLSTM -> head
+src/models/backbones/  flat_mlp (main) | scratch_cnn
 src/data/            field dataset, normalisation, QKV-Lens corpus reader
-src/cam.py           Grad-CAM attribution over the field
+src/cam.py           Integrated Gradients attribution over the field
 configs/             one config per (dataset, LLM)
 docs/plan.md         the research plan
 ```
@@ -58,8 +59,13 @@ Q/K/V are captured **pre-RoPE**, from forward hooks on each layer's
 different widths (`D_q` vs `D_kv`); each is mean-pooled to the same `M`
 independently, so all three land on one channel axis.
 
-The detector is a 2D CNN over `(L, M)` per token, then Conv1d + BiLSTM +
-masked attention pooling over the token axis, then a binary head.
+The detector's backbone turns each token's `(L, M, 3)` field into one
+embedding (`model.backbone`, default `flat_mlp`: flatten + dropout + one
+Linear, no spatial structure preserved -- see
+`src/models/backbones/flat_mlp.py`'s docstring for why. `scratch_cnn`, a 2D
+CNN over `(L, M)`, is the "with spatial structure" ablation arm). Either way,
+the per-token embeddings then go through Conv1d + BiLSTM + masked attention
+pooling over the token axis, then a binary head -- see `src/models/`.
 
 ## What is fixed vs. configurable
 

@@ -16,7 +16,7 @@ salloc --gpus-per-node=l40s:1 --cpus-per-task=24 --mem=24G --time=3:00:00 --acco
 
 
 # Longer / bigger:
-# salloc --gpus-per-node=h100:1 --cpus-per-task=24 --mem=60G --time=3:00:00 --account=aip-lsigal
+# salloc --gpus-per-node=h100:1 --cpus-per-task=24 --mem=60G --time=1:00:00 --account=aip-lsigal
 
 
 # ── STEP 1: ENVIRONMENT ────────────────────────────────────────────────────
@@ -46,86 +46,4 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available(), '|', torch.cu
 
 
 bash all-datasets_extract.sh
-
-# ══════════════════════════════════════════════════════════════════════════
-# SINGLE CONFIG, STEP BY STEP
-# ══════════════════════════════════════════════════════════════════════════
-
-CONFIG="configs/triviaqa/llama3_8b.yaml"
-DATASET=$(python -c "from src.config import load_config; print(load_config('$CONFIG').dataset.name)")
-LLM=$(python -c "from src.config import load_config; print(load_config('$CONFIG').llm.alias)")
-RUN="${LLM}_${DATASET}"
-
-
-# ── STEP 2: EXTRACT ────────────────────────────────────────────────────────
-# Generates responses, hooks q_proj/k_proj/v_proj, and builds the (T, L, M, 3)
-# QKV feature field. The expensive step -- one manual decode loop per batch of
-# examples. Restartable: finished examples are skipped.
-
-python detector.py --config "$CONFIG" extract --set extract.batch_size=16
-
-# Split across jobs if needed (1-indexed blocks of 1000):
-# python detector.py --config "$CONFIG" extract --chunk 1 --set extract.batch_size=16   # examples 0-999
-
-
-# ── STEP 3: INSPECT (do this before training, on day one) ──────────────────
-# Prints the cross-projection correlation matrix. If Q/K/V come back correlated
-# near 1.0 they are redundant, and the three-channel field buys nothing over a
-# single projection.
-
-python detector.py --config "$CONFIG" inspect --idx 0
-
-
-# ── STEP 4: TRAIN ──────────────────────────────────────────────────────────
-
-python detector.py --config "$CONFIG" train --run-name "$RUN"
-
-
-# ── STEP 5: TEST ───────────────────────────────────────────────────────────
-# Pass the plain dataset name. `test` evaluates the held-out slice carved out
-# at train time, and writes test_<dataset>.json next to the checkpoint.
-
-python detector.py --config "$CONFIG" test --checkpoint "runs/$RUN/best.pt" --dataset "$DATASET"
-
-
-# ── RELABEL (optional, free) ───────────────────────────────────────────────
-# meta.txt keeps each response + gold answer next to the tensor, so switching
-# labeling schemes never needs a re-extract.
-
-# python detector.py --config "$CONFIG" label --set labeling.scheme=bleurt
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# WHOLE SUITES
-# ══════════════════════════════════════════════════════════════════════════
-# The .sh files ARE the experiment lists -- open one and read it; run it whole,
-# or copy-paste any single line out of it.
-
-# bash all-datasets_extract.sh        # extract every (dataset x LLM)
-# bash all-datasets_run.sh            # train + test every (dataset x LLM)
-
-# As a batch job (sets up the env, then runs both of the above):
-# sbatch detector.slurm
-
-
-# ── UTILITIES ──────────────────────────────────────────────────────────────
-
-# nvidia-smi
-# ls -lh runs/
-# cat runs/*/test_*.json
-# watch -n 2 'find "$DATA_ROOT" -name "tokens.npy" | wc -l'   # extraction progress
-
-
-
-# ── PREFIX FORECASTING: how early can the detector call a hallucination? ───
-# One cell, to check the plumbing:
-python scripts/analysis/run_forecasting.py \
-  --config configs/triviaqa/llama2_7b.yaml \
-  --checkpoint runs/llama2_7b_triviaqa/best.pt \
-  --set data_root=/scratch/ahmedubc/QKV-Steer-data
-
-# Every cell, then the pooled paper figure (this is the real entry point):
-python scripts/analysis/run_all.py --limit 500
-
-# Redraw the figures from cached sweeps -- no GPU, seconds not hours:
-python scripts/analysis/run_all.py --summary-only
+bash all=datasets_run.sh

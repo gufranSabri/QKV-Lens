@@ -433,6 +433,72 @@ def fig_summary(grid: Grid, out_dir: Path, name: str = "forecasting_summary"):
     return fm.save(fig, out_dir, name)
 
 
+def fig_summary_by_model(grid: Grid, out_dir: Path, name: str = "forecasting_by_model"):
+    """Per-MODEL AUROC-vs-prefix lines, for a grid that is ONE dataset x
+    several models (e.g. the TriviaQA-only structure-analysis forecasting
+    sweep) -- fig_summary's pooled-band design is for a many-cell grid where
+    individual lines are noise; here there are only as many cells as models
+    (3-4), and which MODEL a line belongs to is exactly the comparison this
+    figure exists to make, so pooling it away would erase the point.
+
+    COLOUR: style.py validates only TWO CVD-safe categorical hues (see its
+    docstring), not enough for 4 models. Lines instead use ONE hue's
+    light-to-dark lightness ramp (style.SEQUENTIAL, sampled at 4 fixed
+    points) -- lightness differences stay perceptible under CVD where a 3rd+
+    arbitrary hue would not (style.py's own rejected-3rd-hue finding). Every
+    line is ALSO labelled directly at its right end, so identifying a line
+    never depends on colour discrimination alone.
+    """
+    fm.apply()
+    import matplotlib.pyplot as plt
+    from matplotlib.patheffects import withStroke
+
+    casing = [withStroke(linewidth=4.5, foreground=fm.SURFACE)]
+
+    # Fixed lightness steps (not len(cells)-dependent), so a given model's
+    # line is the same shade across different figures/subsets -- picked
+    # light-to-dark in LLM_ORDER so earlier-released/smaller models read
+    # lighter. Sampled from style.SEQUENTIAL, the one validated single-hue
+    # ramp (see style.py's docstring: "Light->dark keeps magnitude readable
+    # in greyscale and under CVD").
+    shades = [st.SEQUENTIAL(x) for x in (0.35, 0.58, 0.78, 0.97)]
+
+    cells = sorted(grid.cells, key=lambda c: grid.llms.index(c.llm) if c.llm in grid.llms else 99)
+    datasets = {c.dataset for c in cells}
+    dataset_label = (PRETTY_DATASET.get(next(iter(datasets)), next(iter(datasets)))
+                      if len(datasets) == 1 else "mixed datasets")
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+
+    # Colour-matched legend handles, used INSTEAD OF end-of-line annotate()
+    # text: annotate(..., annotation_clip=False) draws outside the axes,
+    # which constrained_layout (set globally by fm.apply()) does not reserve
+    # room for, so the longest label silently clips at the figure edge
+    # (verified: fig.subplots_adjust is a no-op under constrained_layout and
+    # only raises a warning, it does not fix the clipping). A legend IS
+    # something constrained_layout accounts for automatically.
+    from matplotlib.lines import Line2D
+    handles = []
+    for i, cell in enumerate(cells):
+        colour = shades[i % len(shades)]
+        label = PRETTY_LLM.get(cell.llm, cell.llm)
+        ax.plot(FRACTIONS, cell.auroc, color=colour, lw=2.6, zorder=4,
+                path_effects=casing)
+        ax.plot(FRACTIONS, cell.auroc, "o", color=colour, ms=3.8, zorder=5,
+                mec=fm.SURFACE, mew=1.0)
+        handles.append(Line2D([], [], color=colour, lw=2.6, label=label))
+
+    ax.axhline(0.5, color=fm.HAIRLINE, ls=(0, (2, 3)), lw=1.1, zorder=0)
+    _frac_axis(ax)
+    all_auroc = np.concatenate([c.auroc for c in cells])
+    ax.set_ylim(0.45, min(1.0, max(0.75, float(np.nanmax(all_auroc)) + 0.03)))
+    _polish(ax)
+    _panel_head(ax, "", f"AUROC — {dataset_label}")
+    _legend(ax, handles=handles, loc="lower right")
+
+    return fm.save(fig, out_dir, name)
+
+
 # ---------------------------------------------------------------------------
 # Figure: one compact row per cell
 # ---------------------------------------------------------------------------
@@ -838,8 +904,19 @@ def build_cell(cell: Cell, docs: "ForecastPaths", provenance: dict) -> Path:
 
 
 def build_summary(grid: Grid, docs: "ForecastPaths") -> Path:
-    """Pooled figure, tables, and the summary report."""
+    """Pooled figure, tables, and the summary report.
+
+    When the grid spans exactly one dataset (e.g. a TriviaQA-only sweep
+    across models, as opposed to the full LLM x dataset grid), ALSO draws
+    fig_summary_by_model -- fig_summary's pooled bands make sense across many
+    cells, but with only as many cells as models, the per-model identity IS
+    the comparison, so it gets its own line, not an average. A multi-dataset
+    grid skips this (it would conflate "which model" with "which dataset" in
+    one set of lines, which fig_summary_by_model was not designed to show).
+    """
     fig_summary(grid, docs.figures)
+    if len({c.dataset for c in grid.cells}) == 1:
+        fig_summary_by_model(grid, docs.figures)
     write_tables(grid, docs.tables)
     report = write_summary_report(grid, docs.reports,
                                   figure_rel=docs.rel_summary_figure())

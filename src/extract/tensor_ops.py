@@ -151,6 +151,61 @@ def build_feature_field(
     return torch.stack(per_projection, dim=-1)  # (T, L, M, 3)
 
 
+def stack_hidden_states(hidden_states: tuple[tuple[torch.Tensor, ...], ...]) -> torch.Tensor:
+    """generate_outputs["hidden_states"] (capture_all's shape, matching
+    transformers' GenerateDecoderOnlyOutput.hidden_states exactly) -> (T, L, D).
+
+    Args:
+        hidden_states: tuple of T per-step tuples, each of (L+1) per-layer
+            tensors shaped (1, 1, D) -- index 0 of each step is the embedding
+            output, BEFORE any transformer layer; see
+            hallushift_features.plot_internal_state_2's docstring for the
+            same convention. Dropped here (sliced to [1:]) so the returned
+            L axis means "output of transformer layer l", the same thing the
+            QKV field's L axis means -- keeping the two fields' L coordinate
+            comparable is the whole point of extracting hidden states through
+            the SAME shared generation pass as QKV.
+
+    Returns:
+        (T, L, D) float32, L = the model's transformer layer count (not L+1).
+    """
+    if not hidden_states:
+        return torch.empty(0)
+    per_step = []
+    for step in hidden_states:
+        # step[0] is the embedding layer; step[1:] are the L transformer
+        # layers' outputs, each (1, 1, D) -- squeeze to (D,).
+        per_layer = [layer[0, 0].float() for layer in step[1:]]
+        per_step.append(torch.stack(per_layer, dim=0))  # (L, D)
+    return torch.stack(per_step, dim=0)  # (T, L, D)
+
+
+def build_hidden_states_field(
+    hidden: torch.Tensor, n_segments: int, pool: str = "mean"
+) -> torch.Tensor:
+    """Hidden-state activations -> a (T, L, M, 1) field, the same construction
+    as build_feature_field but with ONE channel instead of three.
+
+    Args:
+        hidden:      (T, L, D) -- see stack_hidden_states.
+        n_segments:  M, the number of pooled segments per layer.
+        pool:        one of POOL_MODES; see build_feature_field.
+
+    Returns:
+        (T, L, M, 1). The trailing axis is kept (not squeezed) so a
+        hidden-states field has the SAME rank as a QKV field -- every caller
+        that indexes `field[..., c]` or reads field.shape[-1] for the channel
+        count (e.g. QKVFieldDataset) keeps working unmodified; only the
+        channel count itself (1 vs 3) differs, which those callers already
+        read dynamically from geometry.json rather than assuming 3 -- see
+        src/data/dataset.py's `n_channels` construction-time argument.
+    """
+    if hidden.ndim != 3:
+        raise ValueError(f"expected hidden (T, L, D), got shape {tuple(hidden.shape)}")
+    pooled = pool_segments(hidden.float(), n_segments, mode=pool)  # (T, L, M)
+    return pooled.unsqueeze(-1)  # (T, L, M, 1)
+
+
 def pool_layer_axis(field: torch.Tensor, n_layers_out: int) -> torch.Tensor:
     """Down-pool the LAYER axis of a feature field to a fixed size.
 

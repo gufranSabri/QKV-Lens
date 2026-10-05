@@ -206,7 +206,7 @@ def compute_trajectories(
     device = pick_device()
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
 
-    source = load_source(cfg, dataset_name, cfg.llm.alias)
+    source = load_source(cfg, dataset_name, cfg.llm.alias, field_source=cfg.extract.source)
     source.stats = ckpt["stats"]
 
     # Held-out rows only. Training rows would make early detection look better
@@ -226,7 +226,9 @@ def compute_trajectories(
     if limit is not None:
         indices = indices[:limit]
 
-    model = build_model(cfg).to(device)
+    model = build_model(
+        cfg, field_shape=ckpt.get("field_shape"), in_ch=ckpt.get("in_ch")
+    ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

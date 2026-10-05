@@ -65,10 +65,39 @@ def test(
             ckpt_seed, cfg.model.layer_permute_seed, ckpt_seed,
         )
 
+    # extract.source picks which TREE gets loaded (QKV vs hidden-states) --
+    # unlike layer_permute_seed, a mismatch here is not silent: the checkpoint
+    # was built with the right in_ch for what it trained on (see "in_ch"
+    # above), so feeding it the OTHER tree fails loudly in encode_tokens's own
+    # channel check. Still worth a clear warning before that exception, rather
+    # than discovering it mid-batch.
+    ckpt_source = (ckpt.get("config") or {}).get("extract", {}).get("source", "qkv")
+    if ckpt_source != cfg.extract.source:
+        logger.warning(
+            "extract.source mismatch: checkpoint was trained on %r, this eval "
+            "config requests %r. Pass --set extract.source=%r to match the "
+            "checkpoint, or this eval will fail loudly with a channel-count "
+            "mismatch once it reaches the model.",
+            ckpt_source, cfg.extract.source, ckpt_source,
+        )
+
+    # collapse_axis changes field_shape/in_ch the same way extract.source
+    # does -- a mismatch fails loudly (load_state_dict or encode_tokens),
+    # never silently, but a clear warning up front beats discovering it via
+    # a shape-mismatch stack trace.
+    ckpt_collapse = (ckpt.get("config") or {}).get("model", {}).get("collapse_axis")
+    if ckpt_collapse != cfg.model.collapse_axis:
+        logger.warning(
+            "collapse_axis mismatch: checkpoint was trained with %r, this eval "
+            "config has %r. Pass --set model.collapse_axis=%r to match the "
+            "checkpoint, or this eval will fail loudly once it reaches the model.",
+            ckpt_collapse, cfg.model.collapse_axis, ckpt_collapse,
+        )
+
     name = dataset_name or cfg.dataset.name
     name, eval_set = _resolve_eval_target(name, ckpt, cfg.llm.alias)
 
-    source = load_source(cfg, name, cfg.llm.alias)
+    source = load_source(cfg, name, cfg.llm.alias, field_source=cfg.extract.source)
     if recompute_stats:
         # Explicit opt-in: normalise with statistics computed fresh from the
         # TARGET corpus, instead of the checkpoint's training-LLM statistics.
@@ -104,7 +133,9 @@ def test(
         pin_memory=device.type == "cuda",
     )
 
-    model = build_model(cfg, field_shape=ckpt.get("field_shape")).to(device)
+    model = build_model(
+        cfg, field_shape=ckpt.get("field_shape"), in_ch=ckpt.get("in_ch")
+    ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

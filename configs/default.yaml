@@ -29,13 +29,16 @@ labeling:
   bleurt_checkpoint: models/BLEURT-20-D12
 
 model:
-  backbone: scratch_cnn # scratch_cnn | resnet18
-  embed_dim: 2048 # E: CNN output per token
+  # flat_mlp is the main approach (flattens the (L,M,3) field, no spatial
+  # structure preserved). scratch_cnn (BAFE, the original QKV-Lens CNN)
+  # remains as the structure-preservation ablation's "with spatial structure"
+  # arm -- select via --set model.backbone=scratch_cnn.
+  backbone: flat_mlp # flat_mlp | scratch_cnn
+  embed_dim: 2048 # E: backbone output per token
   conv1d_layers: 2
   lstm_hidden: 2048
   lstm_layers: 1
   dropout: 0.3
-  pretrained_backbone: true # only used by resnet18
 
 train:
   batch_size: 8

@@ -31,18 +31,38 @@ from src.utils.splits import make_split
 logger = get_logger(__name__)
 
 
-def load_source(cfg: Config, dataset_name: str, llm_alias: str, **kw) -> QKVFieldDataset:
+def load_source(
+    cfg: Config, dataset_name: str, llm_alias: str, field_source: str = "qkv", **kw
+) -> QKVFieldDataset:
+    """field_source: "qkv" (default, the canonical/ablation-cell QKV tree) or
+    "hidden-states" (the representation ablation's alternative field -- see
+    src/extract/run_extraction.hidden_states_dir). The hidden-states tree is
+    never a pooling-ablation cell or a legacy QKV-Lens corpus, so it bypasses
+    dataset_dir_for/legacy.resolve_root entirely and is addressed directly.
+    """
     data_root = Path(cfg.data_root)
-    # dataset_name/llm_alias may differ from cfg's own (e.g. cross-LLM test()
-    # evaluates a checkpoint's dataset against another LLM's corpus) -- see
-    # Config.dataset_dir_for. `extract.pool` still comes from cfg: a
-    # pooling-ablation config must read its own pool_<mode> subtree regardless
-    # of which (dataset, llm) combination is being loaded.
-    native = cfg.dataset_dir_for(dataset_name, llm_alias, root=str(data_root))
-    root = legacy.resolve_root(
-        native, data_root, dataset_name, llm_alias,
-        is_default_pool=cfg.extract.pool == "mean",
-    )
+
+    if field_source == "hidden-states":
+        # hidden_states_dir(cfg) itself only reads cfg.dataset.name/
+        # cfg.llm.alias, not arbitrary (dataset, llm) arguments, so the path
+        # is built directly here instead of calling it -- this mirrors
+        # hidden_states_dir's OWN convention ({data_root}/hidden_states/
+        # {dataset}/{llm_alias}/), just parameterised by the (dataset_name,
+        # llm_alias) THIS call was actually given (e.g. a cross-LLM test()
+        # resolving a different LLM's hidden-states tree than cfg's own).
+        root = data_root / "hidden_states" / dataset_name / llm_alias
+    else:
+        # dataset_name/llm_alias may differ from cfg's own (e.g. cross-LLM
+        # test() evaluates a checkpoint's dataset against another LLM's
+        # corpus) -- see Config.dataset_dir_for. `extract.pool` still comes
+        # from cfg: a pooling-ablation config must read its own pool_<mode>
+        # subtree regardless of which (dataset, llm) combination is loaded.
+        native = cfg.dataset_dir_for(dataset_name, llm_alias, root=str(data_root))
+        root = legacy.resolve_root(
+            native, data_root, dataset_name, llm_alias,
+            is_default_pool=cfg.extract.pool == "mean",
+        )
+
     return QKVFieldDataset(
         root,
         max_tokens=cfg.extract.max_tokens,
@@ -50,6 +70,7 @@ def load_source(cfg: Config, dataset_name: str, llm_alias: str, **kw) -> QKVFiel
         keep_channels=cfg.model.keep_channels,
         token_buckets=cfg.model.token_buckets,
         layer_permute_seed=cfg.model.layer_permute_seed,
+        collapse_axis=cfg.model.collapse_axis,
         **kw,
     )
 
@@ -120,9 +141,7 @@ def log_run_header(cfg: Config, run_dir, device, dataset_name: str) -> None:
     logger.info("labeling     : %s", cfg.labeling.scheme)
 
     _section("model")
-    logger.info("backbone     : %s (pretrained=%s)",
-                cfg.model.backbone,
-                cfg.model.pretrained_backbone if cfg.model.backbone == "resnet18" else "n/a")
+    logger.info("backbone     : %s", cfg.model.backbone)
     logger.info("input        : 1 field per token x %d channels (Q, K, V), "
                 "(L, M) spatial -> temporal encoder", N_CHANNELS)
     logger.info("embed_dim    : %d | dropout: %.3g", cfg.model.embed_dim, cfg.model.dropout)
@@ -184,7 +203,7 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     (run_dir / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
     # ---- data ---------------------------------------------------------
-    full = load_source(cfg, dataset_name, cfg.llm.alias)
+    full = load_source(cfg, dataset_name, cfg.llm.alias, field_source=cfg.extract.source)
     logger.info(
         "source %-28s n=%-6d hallucination rate=%.1f%%",
         full.origin, len(full), 100 * np.mean(full.labels),
@@ -238,8 +257,19 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     val_loader = DataLoader(Subset(full, val_idx), shuffle=False, **loader_kw)
 
     # ---- model --------------------------------------------------------
+    # collapse_axis shrinks the L or M axis to 1 at DATA-LOADING time (see
+    # src/data/dataset.py collapse_axis_mean) -- geometry.json's n_rows/
+    # n_segments are extraction-time numbers and never reflect that, so the
+    # backbone's field_shape must be overridden here to match what the
+    # dataset actually hands it, or FlatMLP's eagerly-built first layer
+    # would have the wrong input width.
+    if cfg.model.collapse_axis == "L":
+        n_rows = 1
+    elif cfg.model.collapse_axis == "M":
+        n_segments = 1
     field_shape = (n_rows, n_segments) if n_rows and n_segments else None
-    model = build_model(cfg, field_shape=field_shape).to(device)
+    in_ch = full.n_channels
+    model = build_model(cfg, field_shape=field_shape, in_ch=in_ch).to(device)
 
     _section("architecture")
     log_model_repr(model)
@@ -361,6 +391,12 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
                     # a shape-dependent backbone (e.g. flat_mlp) needs this to
                     # reconstruct an identically-shaped model before loading.
                     "field_shape": field_shape,
+                    # Channel count the model was built for -- 3 for QKV, 1 for
+                    # hidden states. Same reconstruction-before-load need as
+                    # field_shape; a mismatch here fails load_state_dict loudly
+                    # (wrong in_ch -> wrong first-layer shape) rather than
+                    # silently training the wrong architecture at eval time.
+                    "in_ch": in_ch,
                 },
                 run_dir / "best.pt",
             )
