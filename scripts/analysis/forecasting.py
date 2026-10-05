@@ -94,6 +94,18 @@ class Trajectory:
             t -= 1
         return t
 
+    def lockin_fraction(self) -> float:
+        """`first_stable_correct` as a fraction of the response, or NaN.
+
+        NaN (not 1.0) when the final call is wrong: "never locks in" is a
+        different outcome from "locks in only at the very end", and averaging
+        the two together would report a detector that fails on an example as
+        though it succeeded late. Every consumer filters NaN and reports the
+        never-count alongside the median.
+        """
+        t = self.first_stable_correct()
+        return float("nan") if t is None else t / self.n_tokens
+
     def fraction_of(self, values: np.ndarray) -> np.ndarray:
         """Resample a per-token array onto FRACTIONS via nearest token.
 
@@ -105,6 +117,51 @@ class Trajectory:
         idx = np.ceil(FRACTIONS * self.n_tokens).astype(int)
         idx = np.clip(idx, 1, self.n_tokens) - 1
         return values[idx]
+
+
+# ---------------------------------------------------------------------------
+# Cache
+#
+# The sweep is T detector passes per example and needs the extracted field plus
+# a GPU; redrawing a figure needs neither. Every trajectory is therefore stored
+# verbatim -- ragged, since responses differ in length -- so the figures and the
+# pooled summary rebuild from cache in seconds. Storing only the 13-point
+# FRACTIONS resample would have been smaller, but lock-in is a per-token
+# statistic: it cannot be recovered from a resampled curve.
+# ---------------------------------------------------------------------------
+
+
+def save_trajectories(trajs: list[Trajectory], dest: Path, provenance: dict) -> Path:
+    """Write trajectories to `dest` (.npz), ragged, with their provenance."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    lengths = np.array([t.n_tokens for t in trajs], dtype=np.int64)
+    np.savez_compressed(
+        dest,
+        idx=np.array([t.idx for t in trajs], dtype=np.int64),
+        label=np.array([t.label for t in trajs], dtype=np.int64),
+        lengths=lengths,
+        # Ragged: one flat buffer plus the offsets that cut it back apart.
+        probs_concat=np.concatenate([t.probs for t in trajs]).astype(np.float32),
+        offsets=np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64),
+        provenance=np.array(json.dumps(provenance)),
+    )
+    return dest
+
+
+def load_trajectories(src: Path) -> tuple[list[Trajectory], dict]:
+    """Inverse of `save_trajectories`."""
+    with np.load(src, allow_pickle=False) as z:
+        offsets, probs = z["offsets"], z["probs_concat"]
+        trajs = [
+            Trajectory(
+                idx=int(z["idx"][i]),
+                label=int(z["label"][i]),
+                probs=probs[offsets[i]:offsets[i + 1]].astype(np.float64),
+            )
+            for i in range(len(z["idx"]))
+        ]
+        provenance = json.loads(str(z["provenance"]))
+    return trajs, provenance
 
 
 @torch.no_grad()

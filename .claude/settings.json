@@ -44,7 +44,20 @@
       "Bash(cat /scratch/ahmedubc/QKV-Steer-data/truthfulqa/llama2_7b/geometry.json 2>/dev/null *)",
       "Read(//scratch/ahmedubc/QKV-Steer-data/truthfulqa/llama2_7b/**)",
       "Read(//home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer/**)",
-      "Read(//project/6101771/ahmedubc/QKV-Steer/**)"
+      "Read(//project/6101771/ahmedubc/QKV-Steer/**)",
+      "Bash(python3 scripts/analysis/run_all.py --help)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\({k: \\(v if not isinstance\\(v, list\\) else f'[{len\\(v\\)} items]'\\) for k,v in d.items\\(\\)}\\)\")",
+      "Bash(bash -n /project/6101771/ahmedubc/QKV-Steer/reproducing_baselines/run_hallushift.sh)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('hal_detection.py'\\).read\\(\\)\\)\")",
+      "Bash(find /home/ahmedubc/scratch/hallushift-baseline-data -maxdepth 4 2>&1)",
+      "Read(//scratch/ahmedubc/hallushift-baseline-data/**)",
+      "Read(//scratch/ahmedubc/hallushift-baseline-data/results/coqa_processed/**)",
+      "Bash(grep -n \"n_layers=\\\\|hs_dir\\\\|rows_path\\\\|coqa\\\\|truthfulqa\" /project/6101771/ahmedubc/QKV-Steer/slurm/truthfulqa.5049122.err 2>/dev/null | head -5 *)",
+      "Read(//scratch/ahmedubc/QKV-Steer-data/hallushift/truthfulqa/**)",
+      "Read(//home/ahmedubc/scratch/delta-QKV-data/hs/delta/truthfulqa/llama2_7b/**)",
+      "Read(//scratch/ahmedubc/delta-QKV-data/hs/delta/truthfulqa/llama2_7b/**)",
+      "Bash(timeout 120 python3 -c ' *)",
+      "Bash(ls -d /scratch/ahmedubc/QKV-Steer-data/pool_* 2>&1)"
     ],
     "additionalDirectories": [
       "/tmp/tmp3jbmecs2"

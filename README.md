@@ -120,11 +120,66 @@ responses without re-running the LLM.
 Qwen2.5-7B needs `extract.n_segments: 32` set explicitly — its `L=28` does not
 divide its `D_kv=512`, so the square-field default is unavailable.
 
+## Baselines
+
+`scripts/experiments/run_all_baselines.sh` is the single entry point for everything the
+paper compares against, across all 12 (dataset x LLM) settings, ending with
+`docs/tables/main_results.md`:
+
+```bash
+bash scripts/experiments/run_all_baselines.sh
+```
+
+| Baseline | Where it comes from | Status |
+|---|---|---|
+| Perplexity | `reproducing_baselines/perplexity.txt` | run here |
+| Lexical Similarity | `reproducing_baselines/lexical_similarity/` (Lin et al., TMLR 2024) | run here |
+| SelfCheckGPT-NLI | `reproducing_baselines/selfcheckgpt/` (Manakul et al., 2023) | run here |
+| Semantic Entropy | `reproducing_baselines/semantic_uncertainty/` (Kuhn et al., 2023) | run here |
+| Verbalize | `reproducing_baselines/verbalize.pdf` (Lin et al., 2022) | run here |
+| Self-Evaluation | `reproducing_baselines/selv-evaluation.pdf` (Kadavath et al., 2022) | run here |
+| HalluShift | `run_training.py --methods hallushift` | already run |
+| HaloScope, CCS | -- | out of scope; HaloScope is cited, not measured |
+
+Protocol details for the six come from
+`reproducing_baselines/main_instruction.txt`, which fixes the sampling setting
+(10 generations at temperature 0.5) and the exact Verbalize / Self-Evaluation
+prompts.
+
+**They are run on our own generations, not their own.** Nothing is
+regenerated: each baseline scores the greedy responses already in
+`{data_root}/{dataset}/{llm_alias}/*/meta.txt`, against the BLEURT labels
+already in `manifest.jsonl`, on the test indices already in
+`{runs_root}/{llm_alias}_{dataset}/split.json` -- the same partition
+`src/train.py` gave QKV-Steer and `run_training.py` gave HalluShift. That is
+what makes the AUROC column comparable down the whole table.
+
+Three stages, each resumable, under `scripts/baselines/`:
+
+```
+run_llm_baselines.py       loads the LLM once: perplexity, verbalized
+                           confidence, P(True), and 10 sampled generations
+run_sampling_baselines.py  the two NLI models: Rouge-L consistency,
+                           SelfCheckGPT contradiction, semantic clustering
+score_baselines.py         signs each score (high = hallucinated) and
+                           evaluates it on split.json's test slice
+```
+
+Outputs land in `{data_root}/{method}/{dataset}/{llm_alias}/results.json`,
+deliberately the same path shape and key spelling as HalluShift's, so
+`scripts/tables/main_results.py` reads every method with one loader. These
+baselines fit nothing, so only AUROC and PR-AUC are reported by default; run
+with `SUBSET=all` to also get thresholded metrics (the threshold is picked on
+the train split, never on test).
+
 ## Install
 
 ```bash
-bash scripts/install.sh --bleurt     # --bleurt pulls the TF BLEURT scorer
+bash scripts/install.sh --bleurt --baselines
 ```
+
+`--bleurt` pulls the TensorFlow BLEURT scorer (labeling); `--baselines` adds
+`rouge_score` / `nltk` / `sentencepiece` for the baselines above.
 
 `scripts/troubleshooting.sh` is the annotated step-by-step version of the whole
 pipeline; `detector.slurm` runs it as a batch job.

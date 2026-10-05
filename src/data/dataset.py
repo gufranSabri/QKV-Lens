@@ -33,7 +33,11 @@ class QKVFieldDataset(Dataset):
         stats: dict | None = None,
         max_tokens: int | None = None,
         origin: str | None = None,
+        keep_channels: list[str] | None = None,
+        token_buckets: int | None = None,
     ):
+        self.keep_channels = keep_channels
+        self.token_buckets = token_buckets
         self.root = Path(root)
         manifest = self.root / "manifest.jsonl"
         if not manifest.exists():
@@ -113,13 +117,19 @@ class QKVFieldDataset(Dataset):
         if self.max_tokens is not None and field.shape[0] > self.max_tokens:
             field = field[: self.max_tokens]
 
+        if self.token_buckets is not None:
+            field = bucket_pool_tokens(field, self.token_buckets)
+
         return field
 
     def _finish(self, raw: torch.Tensor) -> torch.Tensor:
-        """normalise -> move channels into conv position."""
+        """normalise -> zero unwanted channels -> move channels into conv position."""
         field = raw
         if self.stats is not None:
             field = normalize(field, self.stats)
+
+        if self.keep_channels is not None:
+            field = zero_channels(field, self.keep_channels)
 
         # (T, L, M, 3) -> (T, 3, L, M): channels into conv position.
         return field.permute(0, 3, 1, 2).contiguous()
@@ -128,6 +138,43 @@ class QKVFieldDataset(Dataset):
         rec = self.records[i]
         images = self._finish(self._load_raw(i))
         return images, float(rec["label"]), self.origin
+
+
+def zero_channels(field: torch.Tensor, keep: list[str]) -> torch.Tensor:
+    """Zero every projection channel NOT in `keep` (Q/K/V ablation).
+
+    field: (T, L, M, 3), channels ordered as PROJECTIONS. The channel AXIS is
+    left at width 3 -- only its content is masked -- so the detector's input
+    shape, and every (layer, segment, projection) coordinate, is unaffected by
+    which projections are actually informative. Applied AFTER normalisation
+    (see _finish) so stats are always computed/applied over the full field,
+    never skewed by an ablation that only decides what the model gets to see.
+    """
+    mask = torch.tensor(
+        [1.0 if p in keep else 0.0 for p in PROJECTIONS], dtype=field.dtype
+    ).view(1, 1, 1, N_CHANNELS)
+    return field * mask
+
+
+def bucket_pool_tokens(field: torch.Tensor, n_buckets: int) -> torch.Tensor:
+    """Mean-pool the TOKEN axis (dim 0) down to `n_buckets` contiguous groups.
+
+    field: (T, L, M, 3). Token-axis-compression ablation: does the detector
+    need one embedding per generated token, or does aggregating nearby tokens
+    lose the signal? `n_buckets >= T` is a no-op (every token keeps its own
+    bucket).
+
+    Buckets split T as evenly as possible (sizes differ by at most 1, matching
+    `torch.tensor_split`) rather than requiring T % n_buckets == 0, since
+    response length T varies per example.
+    """
+    t = field.shape[0]
+    if n_buckets >= t:
+        return field
+    return torch.stack(
+        [chunk.mean(dim=0) for chunk in torch.tensor_split(field, n_buckets, dim=0)],
+        dim=0,
+    )
 
 
 def normalize(field: torch.Tensor, stats: dict) -> torch.Tensor:

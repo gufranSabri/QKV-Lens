@@ -89,6 +89,15 @@ def main(argv=None) -> int:
                       help="1-indexed block of 1000 examples (for splitting a long run)")
     p_ex.add_argument("--overwrite", action="store_true",
                       help="re-extract examples that already have tokens.npy")
+    p_ex.add_argument(
+        "--methods", default="qkv-steer",
+        help="comma-separated: which reproducing_baselines/ pipeline(s) to also "
+             "feed from this SAME generation (default: qkv-steer only). "
+             "'hallushift' adds hidden_states/attentions capture and forces "
+             "batch_size=1 + eager attention for the whole run. 'haloscope' is "
+             "accepted but NOT extracted here -- see reproducing_baselines/"
+             "haloscope's own script for its separate beam-search generation.",
+    )
 
     sub.add_parser("label", parents=[common],
                    help="recompute labels from stored responses")
@@ -153,9 +162,13 @@ def main(argv=None) -> int:
     cfg = load_config(args.config, overrides=_overrides(args))
 
     if args.cmd == "extract":
-        from src.extract.run_extraction import run_extraction
+        from src.extract.run_extraction import KNOWN_METHODS, run_extraction
 
-        run_extraction(cfg, chunk=args.chunk, overwrite=args.overwrite)
+        methods = tuple(m.strip() for m in args.methods.split(",") if m.strip())
+        unknown = set(methods) - set(KNOWN_METHODS)
+        if unknown:
+            parser.error(f"--methods: unknown method(s) {sorted(unknown)}; known: {KNOWN_METHODS}")
+        run_extraction(cfg, chunk=args.chunk, overwrite=args.overwrite, methods=methods)
 
     elif args.cmd == "label":
         from src.extract.run_extraction import relabel

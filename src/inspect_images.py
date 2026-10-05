@@ -25,7 +25,10 @@ logger = get_logger(__name__)
 
 
 def inspect(cfg: Config, idx: int = 0, n_tokens: int = 4, out: str | None = None) -> None:
-    root = legacy.resolve_root(Path(cfg.data_root), cfg.dataset.name, cfg.llm.alias)
+    root = legacy.resolve_root(
+        cfg.example_dir(), Path(cfg.data_root), cfg.dataset.name, cfg.llm.alias,
+        is_default_pool=cfg.extract.pool == "mean",
+    )
     ex_dir = root / f"{idx:05d}"
     tokens_path = ex_dir / "tokens.npy"
     if not tokens_path.exists():

@@ -349,7 +349,8 @@ def capture_all(
     max_new_tokens: int = 64,
     eos_token_id=None,
     attention_mask: torch.Tensor | None = None,
-) -> list[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+    capture_generate_outputs: bool = False,
+) -> list[tuple[dict[str, torch.Tensor], torch.Tensor]] | list[tuple[dict, torch.Tensor, dict]]:
     """Greedy-generate and capture per-layer Q/K/V for every generated token.
 
     Args:
@@ -357,11 +358,31 @@ def capture_all(
             device. B == 1 and no padding is the common case; for B > 1, pass
             `attention_mask` from `left_pad_batch` so padded positions are
             excluded from attention.
+        capture_generate_outputs: also request hidden_states/attentions/logits
+            on every decode-step forward pass (needed by baselines other than
+            QKV-Steer's own Q/K/V field, e.g. reproducing_baselines/hallushift's
+            per-token Wasserstein/cosine/probability features). Off by default:
+            output_attentions requires attn_implementation="eager" and returns
+            a full (B, heads, seq_len, seq_len) tensor every step, so this is
+            real extra memory/time callers that don't need it shouldn't pay.
+            REQUIRES B == 1 -- the caller (run_extraction.py) forces batch_size
+            to 1 whenever this is set, since slicing per-row hidden_states/
+            attentions out of a padded batch is not implemented here.
 
     Returns:
-        A list of B (activations, generated_ids) pairs, one per input row:
-          activations["Q"] is (T_i, L, D_q), ["K"]/["V"] are (T_i, L, D_kv),
-          generated_ids is (T_i,) -- that row's response tokens, prompt excluded.
+        Without capture_generate_outputs: a list of B (activations, generated_ids)
+        pairs, one per input row, exactly as before.
+
+        With capture_generate_outputs: a list of B (activations, generated_ids,
+        generate_outputs) triples, where generate_outputs is
+        {"hidden_states": tuple, "attentions": tuple, "logits": tuple}, each a
+        tuple of T_i per-step tensors -- the SAME shapes model.generate(...,
+        output_hidden_states=True, output_attentions=True, output_logits=True)
+        would return, so hallushift's own feature functions can consume them
+        unmodified.
+
+        activations["Q"] is (T_i, L, D_q), ["K"]/["V"] are (T_i, L, D_kv),
+        generated_ids is (T_i,) -- that row's response tokens, prompt excluded.
         T_i is the number of tokens THAT ROW generated before its own EOS (or
         max_new_tokens), so it varies across the returned list; this is not a
         padded tensor.
@@ -380,13 +401,30 @@ def capture_all(
         raise ValueError(f"expected input_ids (B, prompt_len), got {tuple(input_ids.shape)}")
 
     B = input_ids.shape[0]
+    if capture_generate_outputs and B != 1:
+        raise ValueError(
+            f"capture_generate_outputs requires batch_size 1, got B={B} -- "
+            "the caller must force batch_size to 1 when this is set."
+        )
     device = input_ids.device
     eos_ids = _resolve_eos_ids(eos_token_id, model)
+
+    extra_kwargs = (
+        dict(output_hidden_states=True, output_attentions=True, output_logits=True)
+        if capture_generate_outputs
+        else {}
+    )
+    # Per-slot lists of per-step outputs, only populated when requested.
+    step_hidden_states: list[list] = [[] for _ in range(B)]
+    step_attentions: list[list] = [[] for _ in range(B)]
+    step_logits: list[list] = [[] for _ in range(B)]
 
     with qkv_hooks(model, batch_size=B) as capture:
         # ---- PREFILL: consume the prompt. NOT recorded. ----
         capture._recording = False
-        out = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True)
+        out = model(
+            input_ids=input_ids, attention_mask=attention_mask, use_cache=True, **extra_kwargs
+        )
         past = out.past_key_values
         next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)  # (B, 1)
 
@@ -436,12 +474,29 @@ def capture_all(
                 past_key_values=past,
                 attention_mask=running_mask,
                 use_cache=True,
+                **extra_kwargs,
             )
             past = out.past_key_values
 
             for i in range(B):
                 if not finished[i]:
                     generated[i].append(int(next_token[i, 0].item()))
+                    if capture_generate_outputs:
+                        # Move off-device immediately, same reasoning as
+                        # QKVCapture.record: keeping these on GPU across a
+                        # 100-token generation is what blows up memory.
+                        step_hidden_states[i].append(
+                            tuple(h[i : i + 1].detach().cpu() for h in out.hidden_states)
+                        )
+                        step_attentions[i].append(
+                            tuple(a[i : i + 1].detach().cpu() for a in out.attentions)
+                        )
+                        # (batch, seq=1, vocab) -> (batch, vocab): matches
+                        # transformers' GenerateDecoderOnlyOutput.logits shape
+                        # exactly (seq already squeezed there), which is what
+                        # hallushift's probability_function assumes when it
+                        # does F.softmax(logit[0], dim=0) expecting (vocab,).
+                        step_logits[i].append(out.logits[i : i + 1, -1].detach().cpu())
 
             next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
@@ -449,9 +504,15 @@ def capture_all(
 
     if all(not g for g in generated):
         # Every row emitted EOS immediately: no response tokens, no fields.
-        return [
+        empty = [
             ({v: torch.empty(0) for v in VIEWS}, torch.empty(0, dtype=torch.long))
             for _ in range(B)
+        ]
+        if not capture_generate_outputs:
+            return empty
+        return [
+            (acts, ids, {"hidden_states": (), "attentions": (), "logits": ()})
+            for acts, ids in empty
         ]
 
     qkv_by_slot = capture.stack()  # {view: {slot: (T_slot, L, D)}}
@@ -469,7 +530,19 @@ def capture_all(
                     "prefill/decode split or per-slot masking is wrong."
                 )
             row_out[view] = tensor
-        results.append(
-            (row_out, torch.tensor(generated[i], dtype=torch.long, device=device))
-        )
+        gen_ids_tensor = torch.tensor(generated[i], dtype=torch.long, device=device)
+        if not capture_generate_outputs:
+            results.append((row_out, gen_ids_tensor))
+        else:
+            results.append(
+                (
+                    row_out,
+                    gen_ids_tensor,
+                    {
+                        "hidden_states": tuple(step_hidden_states[i]),
+                        "attentions": tuple(step_attentions[i]),
+                        "logits": tuple(step_logits[i]),
+                    },
+                )
+            )
     return results

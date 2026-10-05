@@ -67,27 +67,40 @@ RAW_CHANNEL = 0
 LEGACY_PREFIXES = (("qkv", "transforms"), ("qkv", "delta"))
 
 
-def resolve_root(data_root: Path, dataset: str, llm_alias: str) -> Path:
+def resolve_root(
+    native: Path, data_root: Path, dataset: str, llm_alias: str, is_default_pool: bool = True
+) -> Path:
     """Locate a corpus, preferring the QKV-Steer layout and falling back to a
     QKV-Lens tree.
 
+    Args:
+        native: the path a fresh extraction under the CALLER's config would
+            write to -- i.e. `cfg.example_dir()`, already carrying any
+            non-default `extract.pool` prefix (see Config.example_dir).
+        is_default_pool: False for a pooling-ablation config (extract.pool !=
+            "mean"). A legacy QKV-Lens tree is a mean-pooled corpus in
+            disguise (see `assert_compatible`'s `pool` check) -- falling back
+            to it for a NON-default pool request would silently hand the
+            caller mean-pooled data under a config that asked for `max` or
+            `strided`, so the fallback is skipped entirely in that case.
+
     Returns the QKV-Steer path unchanged when it exists (or when no legacy tree
-    does), so a fresh extraction always wins and the fallback can never shadow
-    it. This keeps `data_root` a single setting rather than forcing the user to
-    spell out the old {source}/{extraction_type} levels.
+    applies), so a fresh extraction always wins and the fallback can never
+    shadow it. This keeps `data_root` a single setting rather than forcing the
+    user to spell out the old {source}/{extraction_type} levels.
     """
-    native = data_root / dataset / llm_alias
     if (native / "manifest.jsonl").exists():
         return native
 
-    for prefix in LEGACY_PREFIXES:
-        candidate = data_root.joinpath(*prefix, dataset, llm_alias)
-        if (candidate / "manifest.jsonl").exists():
-            logger.info(
-                "no QKV-Steer corpus at %s; using the QKV-Lens tree at %s",
-                native, candidate,
-            )
-            return candidate
+    if is_default_pool:
+        for prefix in LEGACY_PREFIXES:
+            candidate = data_root.joinpath(*prefix, dataset, llm_alias)
+            if (candidate / "manifest.jsonl").exists():
+                logger.info(
+                    "no QKV-Steer corpus at %s; using the QKV-Lens tree at %s",
+                    native, candidate,
+                )
+                return candidate
 
     # Nothing found: return the native path so the caller's own "run extract
     # first" error names the location a fresh extraction would write to.

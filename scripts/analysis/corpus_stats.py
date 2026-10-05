@@ -9,15 +9,21 @@ unlabeled count called out explicitly rather than silently mixed into the
 hallucination rate.
 
 Usage:
-    python3 scripts/corpus_stats/compute_stats.py [--config configs/default.yaml] [--out scripts/corpus_stats/report.md]
+    python3 scripts/analysis/corpus_stats.py [--config configs/default.yaml] [--out docs/tables/corpus_stats.md]
 """
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import yaml
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.baselines.common import METHODS as BASELINE_METHODS  # noqa: E402
 
 
 def load_data_root(config_path: str) -> Path:
@@ -70,10 +76,21 @@ def stats_for_pair(dataset: str, llm_alias: str, root: Path) -> dict:
     }
 
 
+#: Top-level entries under data_root that are NOT (dataset, llm_alias) trees.
+#: Each is some METHOD's own output, laid out as {method}/{dataset}/{llm_alias}
+#: with no manifest.jsonl -- walking one as a dataset would read its {dataset}
+#: dirs as "models" and either crash or silently emit garbage rows.
+#: "hallushift" is reproducing_baselines/hallushift's; the rest are the
+#: training-free baselines' (scripts/baselines/common.method_dir and
+#: shared_dir), which is why the list is imported from there rather than
+#: restated -- adding a baseline must not silently corrupt this report.
+EXCLUDED_TOP_LEVEL = {"hallushift", "baselines", *BASELINE_METHODS}
+
+
 def discover_pairs(root: Path) -> list[tuple[str, str]]:
     pairs = []
     for dataset_dir in sorted(root.iterdir()):
-        if not dataset_dir.is_dir():
+        if not dataset_dir.is_dir() or dataset_dir.name in EXCLUDED_TOP_LEVEL:
             continue
         for model_dir in sorted(dataset_dir.iterdir()):
             if model_dir.is_dir():
@@ -171,7 +188,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument(
         "--out",
-        default=str(Path(__file__).parent / "report.md"),
+        default=str(REPO_ROOT / "docs" / "tables" / "corpus_stats.md"),
     )
     args = parser.parse_args()
 

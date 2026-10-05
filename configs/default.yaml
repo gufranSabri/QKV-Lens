@@ -58,4 +58,4 @@ train:
 # runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer
 
 data_root: /scratch/ahmedubc/QKV-Steer-data
-runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer
+runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer/runs

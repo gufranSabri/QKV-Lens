@@ -10,8 +10,8 @@
 RERUN=${RERUN:-0}
 
 DATASETS=(
-    # triviaqa
-    # truthfulqa
+    triviaqa
+    truthfulqa
     coqa
 )
 
@@ -29,7 +29,7 @@ run_train() {
         echo "  [skip] train runs/${run_name} (results.json already exists; RERUN=1 to force)"
         return
     fi
-    python detector.py --config configs/$DATASET/$MODEL.yaml train --run-name "runs/${run_name}" "$@"
+    python detector.py --config configs/$DATASET/$MODEL.yaml train --run-name "${run_name}" "$@"
 }
 
 # run_test <run_name> [--set key=val ...]

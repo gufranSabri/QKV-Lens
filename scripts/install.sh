@@ -7,14 +7,17 @@
 #
 #   bash scripts/install.sh              # core deps only (exact_match labeling)
 #   bash scripts/install.sh --bleurt     # + BLEURT (needed for HalluShift work)
+#   bash scripts/install.sh --baselines  # + the training-free baselines' deps
 #
 # Assumes the venv is already created and ACTIVATED by the caller.
 # ============================================================================
 set -euo pipefail
 
 WITH_BLEURT=0
+WITH_BASELINES=0
 for arg in "$@"; do
   [ "$arg" = "--bleurt" ] && WITH_BLEURT=1
+  [ "$arg" = "--baselines" ] && WITH_BASELINES=1
 done
 
 echo "[install] core dependencies"
@@ -43,6 +46,53 @@ pip install $PIP_FLAGS \
   pytest
 
 echo "[install] core dependencies OK"
+
+# -- training-free baselines --------------------------------------------------
+# Only needed by scripts/experiments/run_all_baselines.sh. Kept behind a flag so an
+# extraction/training allocation does not pay for them.
+# Two of these baselines run the ORIGINAL authors' code straight out of
+# reproducing_baselines/ (see scripts/baselines/upstream.py), so this installs
+# what THEIR modules import at load time, not just what the scoring needs:
+#   spacy         selfcheckgpt/modeling_selfcheck.py imports it at module
+#                 level; it is also the sentence splitter their README uses.
+#   bert_score    same file, for the SelfCheckBERTScore variant we never call.
+#                 Not in the Compute Canada wheelhouse -> PyPI, --no-deps.
+#   evaluate      lexical_similarity/dataeval/load_worker.py does
+#                 evaluate.load('rouge') at import; that IS their Rouge-L.
+#   persist_to_disk, pandarallel, ipdb
+#                 also imported at module level by that same file.
+#   sentencepiece + protobuf   DeBERTa-v3's tokenizer, for SelfCheckGPT-NLI
+#   rouge_score   not used upstream; kept for local sanity checks
+# NOT installed: openai. lexical_similarity wants the pre-1.0 SDK for a GPT-3.5
+# path we never call; upstream.py stubs that import instead of pinning a 2023
+# SDK into the environment.
+if [ "$WITH_BASELINES" -eq 1 ]; then
+  echo "[install] training-free baseline dependencies"
+  pip install $PIP_FLAGS rouge_score sentencepiece protobuf
+  # spacy resolves from the cluster wheelhouse; from PyPI it tries to build
+  # pydantic-core from source (needs Rust) and fails on this cluster.
+  pip install $PIP_FLAGS spacy
+  # bert_score is not in the wheelhouse. --no-deps because its pins would drag
+  # in a conflicting torch/transformers; nothing we call touches them.
+  pip install --no-deps bert_score
+  # pandarallel, ipdb and evaluate ARE in the wheelhouse -- keep $PIP_FLAGS so
+  # they resolve there and cannot perturb the core install.
+  pip install $PIP_FLAGS pandarallel ipdb evaluate
+  # persist_to_disk is the ONLY one genuinely absent from the wheelhouse, so it
+  # is the only line that may reach PyPI. --no-deps is essential: without it
+  # pip mixes PyPI metadata with the wheelhouse and backtracks huggingface-hub
+  # from 1.30 down to 1.4.1, below the >=1.5.0 that transformers 5.x requires,
+  # which breaks every `from transformers import ...` in the run that follows.
+  # persist_to_disk's own deps (pandas, numpy, pyyaml) are already installed.
+  pip install --no-deps persist_to_disk
+
+  # spaCy's small English model -- SelfCheckGPT's README splits sentences with
+  # it. upstream.selfcheck_sentences falls back to a regex if it is missing,
+  # so a failed download is a warning, not an error.
+  python -m spacy download en_core_web_sm 2>/dev/null \
+    || echo "[install] en_core_web_sm unavailable; regex sentence split will be used"
+  echo "[install] baseline dependencies OK"
+fi
 
 # ── BLEURT ─────────────────────────────────────────────────────────────────
 # Only needed for labeling.scheme=bleurt, i.e. the HalluShift comparison.

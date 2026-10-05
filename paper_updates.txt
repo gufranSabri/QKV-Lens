@@ -1,0 +1,92 @@
+PAPER UPDATES (generated 2026-10-04)
+Source: docs/tables/significance_stats.csv, docs/figures/significance.{png,pdf}, docs/tables/main_results.csv
+
+=====================================================================
+1. SIGNIFICANCE PARAGRAPH (full-dataset run, masked per-token analysis)
+=====================================================================
+
+\vspace{2mm}\noindent\textbf{Statistical Evidence of Distributed Signals.} We next ask whether the hallucination signal is statistically meaningful, and whether it is localized or distributed as suggested in Figure~\ref{fig:prototype_maps}. We analyse all twelve model--dataset settings using every response. Each $(\text{token},\text{layer})$ cell is averaged only over responses that contain that token, and we analyse only token positions with at least 30 responses in both classes. We use two measures. First, we compare the mean absolute feature-map difference between classes against a 500-iteration empirical null from label permutations. Second, we compute location-wise Cohen's $d$ across all $(\text{view},\text{token},\text{layer})$ coordinates.
+
+Figure~\ref{fig:significance}(a) shows that global class separation is statistically significant in nine of twelve settings ($z\in[-0.05, 24.51]$), with the strongest signal consistently on TriviaQA across all four models. Significance is not universal: the three CoQA settings with Llama-2-7B, Llama-3.1-8B and Qwen2.5-7B do not clear $p<0.05$. Figure~\ref{fig:significance}(c) normalizes these separations by the model-specific null, giving 1.0--2.7$\times$ chance with a median of 1.28$\times$, well short of an order of magnitude. Figure~\ref{fig:significance}(b) shows that effects at individual locations are small: the mean $|d|$ per cell is 0.10--0.19 in every setting, below the conventional small-effect threshold of 0.2. A few cells do reach medium effect sizes ($\max|d|\in[0.47,0.91]$), but at most 6\% of cells in any view exceed $|d|=0.5$, so the signal is not carried by a handful of highly discriminative locations.
+
+Across the three projection views, Query and Key show slightly larger local effects than Value (mean $|d|$ of 0.138, 0.139 and 0.129). The Q/K advantage is small, and it is also less consistent than a clean ordering would suggest (Q and K both exceed V in only 6 of 12 settings). It is clearer in the tails: up to 6.1\% and 4.6\% of Q and K cells exceed $|d|=0.5$, against 1.7\% for V. Together, these findings show that the hallucination signal is \textit{statistically detectable in most, but not all, settings, and where present, is spatially diffuse rather than localized}.
+
+
+=====================================================================
+2. MAIN RESULTS TABLE (AUROC, held-out test, from main_results.csv)
+=====================================================================
+Notes:
+ - QKV-Steer row updated to the 12 test AUROCs in the CSV; Semantic Entropy
+   Qwen2.5 TriviaQA is 83.98 (was 83.97).
+ - Bold = best measured value per column (HaloScope, cited from another
+   generation setup, is excluded and not shown).
+ - "QKV-Lens" renamed to "QKV-Steer"; \multirow{9} corrected to {8}.
+
+\begin{table*}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{0.99}
+\setlength{\tabcolsep}{5pt}
+\caption{Performance comparison across hallucination detection methods (AUROC).}
+\label{tab:qkvsteer_results}
+
+\begin{tabular}{llccccc}
+\toprule
+\textbf{Model} & \textbf{Method} & \textbf{Single Sampling} &
+\textbf{TruthfulQA} & \textbf{TriviaQA} & \textbf{CoQA} \\
+\midrule
+
+\multirow{8}{*}{LLaMA-2-7B}
+& Perplexity \cite{ren2022out}         & \checkmark & 63.89 & 77.31 & -- \\
+& Semantic Entropy \cite{kuhn2023semantic}   & $\times$   & 53.88 & 81.47 & -- \\
+& Lexical Similarity \cite{lin2023generating} & $\times$   & 48.71 & 75.26 & -- \\
+& SelfCKGPT \cite{manakul2023selfcheckgpt}          & $\times$   & 50.04 & 77.28 & -- \\
+& Verbalize \cite{lin2022teaching}          & \checkmark & 50.21 & 47.97 & -- \\
+& Self-evaluation \cite{kadavath2022language}    & \checkmark & 44.14 & 44.61 & -- \\
+& HalluShift \cite{dasgupta2025hallushift}         & \checkmark & 52.25 & 76.49 & 65.60 \\
+& \textbf{QKV-Steer (Ours)}
+                      & \checkmark & \textbf{65.27} & \textbf{84.09} & \textbf{72.86} \\
+\midrule
+
+\multirow{8}{*}{LLaMA-3.1-8B}
+& Perplexity \cite{ren2022out}         & \checkmark & 54.44 & 67.63 & 68.24 \\
+& Semantic Entropy \cite{kuhn2023semantic}   & $\times$   & 59.32 & 80.47 & \textbf{71.89} \\
+& Lexical Similarity \cite{lin2023generating} & $\times$   & 50.72 & 74.15 & 70.75 \\
+& SelfCKGPT \cite{manakul2023selfcheckgpt}          & $\times$   & 59.64 & 81.77 & 65.52 \\
+& Verbalize \cite{lin2022teaching}          & \checkmark & 49.20 & 50.00 & 50.00 \\
+& Self-evaluation \cite{kadavath2022language}    & \checkmark & 58.74 & 42.37 & 51.91 \\
+& HalluShift \cite{dasgupta2025hallushift}         & \checkmark & \textbf{69.43} & -- & 69.54 \\
+& QKV-Steer (Ours)
+                      & \checkmark & 66.23 & \textbf{85.26} & 71.71 \\
+\midrule
+
+\multirow{8}{*}{OPT-6.7B}
+& Perplexity \cite{ren2022out}         & \checkmark & 64.73 & 76.66 & -- \\
+& Semantic Entropy \cite{kuhn2023semantic}   & $\times$   & 58.39 & 76.73 & -- \\
+& Lexical Similarity \cite{lin2023generating} & $\times$   & 39.83 & 70.41 & -- \\
+& SelfCKGPT \cite{manakul2023selfcheckgpt}          & $\times$   & 57.18 & 75.02 & -- \\
+& Verbalize \cite{lin2022teaching}          & \checkmark & 49.74 & 48.89 & -- \\
+& Self-evaluation \cite{kadavath2022language}    & \checkmark & 50.89 & 56.53 & -- \\
+& HalluShift \cite{dasgupta2025hallushift}         & \checkmark & \textbf{69.92} & 75.02 & 66.61 \\
+& QKV-Steer (Ours)
+                      & \checkmark & 68.45 & \textbf{83.35} & \textbf{74.37} \\
+\midrule
+
+\multirow{8}{*}{Qwen2.5-7B}
+& Perplexity \cite{ren2022out}         & \checkmark & 56.92 & 80.54 & 70.27 \\
+& Semantic Entropy \cite{kuhn2023semantic}   & $\times$   & 64.85 & 83.98 & 64.24 \\
+& Lexical Similarity \cite{lin2023generating} & $\times$   & 61.30 & 75.47 & 65.24 \\
+& SelfCKGPT \cite{manakul2023selfcheckgpt}          & $\times$   & 70.60 & 85.33 & 69.51 \\
+& Verbalize \cite{lin2022teaching}          & \checkmark & 51.66 & 43.70 & 50.25 \\
+& Self-evaluation \cite{kadavath2022language}    & \checkmark & 54.63 & 73.20 & 62.93 \\
+& HalluShift \cite{dasgupta2025hallushift}         & \checkmark & 61.75 & 78.20 & 66.72 \\
+& \textbf{QKV-Steer (Ours)}
+                      & \checkmark & \textbf{71.70} & \textbf{88.99} & \textbf{77.61} \\
+
+\bottomrule
+
+\end{tabular}
+\end{table*}
+
+
+

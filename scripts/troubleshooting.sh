@@ -11,7 +11,7 @@
 # ── STEP 0: ALLOCATE ───────────────────────────────────────────────────────
 # Run ONE of these.
 
-salloc --gpus-per-node=l40s:1 --cpus-per-task=24 --mem=60G --time=3:00:00 --account=aip-lsigal
+salloc --gpus-per-node=l40s:1 --cpus-per-task=24 --mem=24G --time=3:00:00 --account=aip-lsigal
 # salloc --gpus-per-node=l40s:1 --cpus-per-task=8 --mem=16G --time=1:00:00 --account=aip-lsigal
 
 
@@ -117,7 +117,15 @@ python detector.py --config "$CONFIG" test --checkpoint "runs/$RUN/best.pt" --da
 
 
 
-python analysis/run_forecasting.py \
+# ── PREFIX FORECASTING: how early can the detector call a hallucination? ───
+# One cell, to check the plumbing:
+python scripts/analysis/run_forecasting.py \
   --config configs/triviaqa/llama2_7b.yaml \
   --checkpoint runs/llama2_7b_triviaqa/best.pt \
-  --set data_root=/scratch/ahmedubc/delta-QKV-data
+  --set data_root=/scratch/ahmedubc/QKV-Steer-data
+
+# Every cell, then the pooled paper figure (this is the real entry point):
+python scripts/analysis/run_all.py --limit 500
+
+# Redraw the figures from cached sweeps -- no GPU, seconds not hours:
+python scripts/analysis/run_all.py --summary-only

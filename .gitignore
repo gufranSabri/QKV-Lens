@@ -43,3 +43,10 @@ CONTRIBUTING.md
 
 docs/
 bleurt/
+.claude/
+reproducing_baselines/
+scripts/baselines/
+scripts/experiments/
+scripts/figures/
+scripts/tables/
+slurm/

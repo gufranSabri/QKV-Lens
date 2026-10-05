@@ -7,22 +7,29 @@ QKV-Lens ablation surface: every option that only existed to produce an ablation
 row in that paper has been removed, and the method's own settings are now fixed
 in code rather than re-selected per run.
 
-Fixed, no longer a config key (QKV-Lens paper §5.3 and Tables 3-4):
+Fixed, no longer a config key (QKV-Lens paper §5.3 and Table 4):
 
     feature field    (T, L, M, 3), trailing axis = (Q, K, V)   [Alg. 1]
-    pooling          mean over M contiguous segments           [Table 3]
     detector input   ONE image per token, 3 channels           [Alg. 1]
     decoding         greedy                                    [§5.3]
 
 Those are not knobs because QKV-Steer's whole premise is that the detector's
 attribution addresses real (layer, segment, projection) coordinates. Changing
-the pooling rule or the channel semantics would change what a coordinate means,
-and the steering stage would be writing into a different space than the one the
-detector looked at.
+the channel semantics would change what a coordinate means, and the steering
+stage would be writing into a different space than the one the detector
+looked at.
+
+`extract.pool` (mean/max/strided, QKV-Lens Table 3) is the one exception:
+`mean` is still THE fixed, canonical setting -- the only one steering may run
+against -- but the pooling ablation itself was re-added as an opt-in, since
+choosing a different pool changes what each segment covers (a value, not a
+coordinate), not which coordinates exist. A non-default pool writes to its own
+`data_root` subtree (see Config.dataset_dir_for) precisely so it can never be
+mistaken for, or silently shadow, the canonical corpus.
 
 What remains configurable is what genuinely varies across runs: which LLM, which
-dataset, how many segments M, how many tokens, and the detector's own capacity
-and optimisation settings.
+dataset, how many segments M, how many tokens, the pooling ablation, and the
+detector's own capacity and optimisation settings.
 """
 
 from __future__ import annotations
@@ -39,6 +46,23 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
 VALID_BACKBONES = ("scratch_cnn", "resnet18")
 VALID_SCHEMES = ("exact_match", "bleurt")
+
+#: Per-model n_segments that is CANONICAL for that model -- i.e. baked into
+#: its own configs/{dataset}/{alias}.yaml for a structural reason, not an
+#: ablation override. Only Qwen2.5-7B needs an entry: its L=28 does not
+#: divide its GQA D_kv=512, so `configs/*/qwen2.5_7b.yaml` sets
+#: extract.n_segments=32 permanently (see that file's own comment). Every
+#: other model's canonical value is `null` (-> the model's own layer count,
+#: resolved at extraction time -- see run_extraction.py), so it never appears
+#: here. `dataset_dir_for` consults this to tell "this model's one true
+#: n_segments" apart from "a pooling-ablation sweep's non-canonical M" --
+#: without it, Qwen2.5-7B's real, only-ever-used corpus would misclassify as
+#: an ablation cell and route to a pool_mean_ncols32/ subtree nothing ever
+#: extracts into. Add an entry here, not a special case in dataset_dir_for,
+#: if a future model config needs the same treatment.
+CANONICAL_N_SEGMENTS: dict[str, int] = {
+    "qwen2.5_7b": 32,
+}
 
 
 @dataclass
@@ -82,6 +106,14 @@ class ExtractConfig:
     # Only needed for cross-LLM work, where Llama (32) and Qwen (28) differ.
     # Must stay null for steering: the layer remap is not invertible.
     l_eff: int | None = None
+    # Segment-pooling strategy: one of tensor_ops.POOL_MODES. `mean` (default)
+    # is the paper's fixed setting and the only mode steering may run against
+    # (see src/extract/tensor_ops.py POOL_MODES). `max`/`strided` exist ONLY
+    # to reproduce the pooling ablation (QKV-Lens Table 3) -- a non-default
+    # value writes to its OWN data_root subtree (see Config.example_dir), so
+    # it can never silently overwrite the canonical mean-pooled corpus a
+    # trained checkpoint or steering run depends on.
+    pool: str = "mean"
 
 
 @dataclass
@@ -109,6 +141,22 @@ class ModelConfig:
     lstm_layers: int = 1
     dropout: float = 0.3
     pretrained_backbone: bool = True   # only meaningful for resnet18
+    # Which of the field's 3 fixed channels (Q, K, V) actually reach the
+    # detector, e.g. ["Q"] or ["Q", "V"]. `null` (default) keeps all three.
+    # The FIELD is unchanged either way -- (T, L, M, 3) is still what gets
+    # extracted and stored -- this only zeroes the channels NOT listed at
+    # data-loading time, so the CNN's input shape (and every steering
+    # coordinate) stays fixed at 3 channels. This is an ablation over the
+    # detector's input, not a revival of the removed `model.channels`/
+    # `include` machinery: there is still exactly one image stream, one CNN.
+    keep_channels: list[str] | None = None
+    # Compress the TOKEN axis to this many buckets by mean-pooling contiguous
+    # runs of generated tokens, applied AFTER extract.max_tokens cropping (see
+    # QKVFieldDataset._load_raw). `null` (default) keeps every token as its
+    # own step. Ablation-only, like `keep_channels` -- does not change what a
+    # (layer, segment, projection) coordinate means, only how many token
+    # positions the temporal encoder sees.
+    token_buckets: int | None = None
 
 
 @dataclass
@@ -151,18 +199,56 @@ class Config:
 
     # ---- derived paths -------------------------------------------------
     def example_dir(self, root: str | None = None) -> Path:
-        """Where this (dataset, LLM)'s feature fields live:
+        """`dataset_dir_for` for THIS config's own (dataset, llm) -- see there."""
+        return self.dataset_dir_for(self.dataset.name, self.llm.alias, root=root)
 
-            {data_root}/{dataset}/{llm_alias}/
+    def dataset_dir_for(self, dataset_name: str, llm_alias: str, root: str | None = None) -> Path:
+        """Where a (dataset, LLM)'s feature fields live, under THIS config's
+        `extract.pool` / `extract.n_segments`:
+
+            {data_root}/{dataset}/{llm_alias}/                              (canonical pool + n_segments)
+            {data_root}/pool_{pool}[_ncols{n_segments}]/{dataset}/{llm_alias}/  (an ablation cell)
+
+        Takes an explicit (dataset_name, llm_alias) rather than always reading
+        `self.dataset.name`/`self.llm.alias`, because some callers resolve a
+        DIFFERENT dataset/LLM than the config's own under the config's pool
+        setting -- e.g. a cross-LLM `test` evaluates the checkpoint's dataset
+        against another LLM's corpus (see src/train.py load_source).
 
         The old {source}/{extraction_type} path levels are gone with the
-        options that produced them -- there is one field per (dataset, LLM) now.
+        options that produced them -- there is one field per (dataset, LLM) at
+        the canonical path now. The `pool_{mode}[_ncols{M}]/` prefix ONLY
+        appears for an actual pooling-ablation cell (QKV-Lens Table 3) -- this
+        keeps every existing corpus's path unchanged, and guarantees an
+        ablation extraction can never land on top of (or be silently read as)
+        the canonical corpus a checkpoint or steering run depends on.
+
+        "Canonical" is `pool == "mean"` AND `n_segments` matching THIS model's
+        own canonical value: `null` for every model except the ones listed in
+        `CANONICAL_N_SEGMENTS` (currently only Qwen2.5-7B, whose config
+        permanently sets n_segments=32 for a structural GQA-divisibility
+        reason -- see that constant's docstring). Checking against the
+        MODEL's registered value, not merely "is n_segments None", matters
+        for two reasons pulling in opposite directions: (1) Qwen2.5-7B's
+        n_segments=32 is baked into its own config file, not a sweep
+        override, and must resolve to the bare canonical path or every
+        Qwen2.5-7B run 404s against a pool_mean_ncols32/ subtree nothing
+        extracts into; (2) the OTHER three models' non-32 M cells in a
+        pooling-ablation sweep (M=16/64/128 at pool=mean) must NOT collapse
+        onto the bare canonical path either, or they silently collide into
+        one directory and only the first extraction for that pool mode is
+        ever real -- which is the bug this whole scheme exists to prevent.
         """
-        return (
-            Path(root or self.data_root)
-            / self.dataset.name
-            / self.llm.alias
-        )
+        base = Path(root or self.data_root)
+        e = self.extract
+        canonical_n_segments = CANONICAL_N_SEGMENTS.get(llm_alias)
+        is_canonical = e.pool == "mean" and e.n_segments == canonical_n_segments
+        if not is_canonical:
+            suffix = f"pool_{e.pool}"
+            if e.n_segments is not None:
+                suffix += f"_ncols{e.n_segments}"
+            base = base / suffix
+        return base / dataset_name / llm_alias
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -178,6 +264,10 @@ class Config:
             raise ValueError("extract.n_segments must be >= 1 or null")
         if e.l_eff is not None and e.l_eff < 1:
             raise ValueError("extract.l_eff must be >= 1 or null")
+        from src.extract.tensor_ops import POOL_MODES
+
+        if e.pool not in POOL_MODES:
+            raise ValueError(f"extract.pool must be one of {POOL_MODES}, got {e.pool!r}")
 
         if m.backbone not in VALID_BACKBONES:
             raise ValueError(
@@ -191,6 +281,20 @@ class Config:
             raise ValueError("model.conv1d_layers must be >= 0")
         if not 0.0 <= m.dropout < 1.0:
             raise ValueError("model.dropout must be in [0, 1)")
+        if m.keep_channels is not None:
+            from src.extract.tensor_ops import PROJECTIONS
+
+            if not m.keep_channels:
+                raise ValueError("model.keep_channels must not be empty")
+            if len(set(m.keep_channels)) != len(m.keep_channels):
+                raise ValueError(f"model.keep_channels has duplicates: {m.keep_channels}")
+            bad = [c for c in m.keep_channels if c not in PROJECTIONS]
+            if bad:
+                raise ValueError(
+                    f"model.keep_channels: unknown {bad}, valid are {list(PROJECTIONS)}"
+                )
+        if m.token_buckets is not None and m.token_buckets < 1:
+            raise ValueError("model.token_buckets must be >= 1 or null")
 
         if la.scheme not in VALID_SCHEMES:
             raise ValueError(f"labeling.scheme must be one of {VALID_SCHEMES}")
@@ -244,7 +348,6 @@ _REMOVED_KEYS: dict[str, str] = {
     "extract.source": "hidden states were a QKV-Lens ablation baseline; only the QKV field remains",
     "extract.extraction_type": "delta/transform channels competed for the channel axis, which now holds Q/K/V",
     "extract.views": "Q, K and V are always all three, as the field's channel axis",
-    "extract.pool": "mean pooling is fixed (QKV-Lens Table 3)",
     "extract.boundary_mode": "only meaningful for the removed delta channels",
     "extract.n_cols": "renamed to extract.n_segments (the paper's M)",
     "model.channels": "each token is one 3-channel image; there is nothing to regroup",

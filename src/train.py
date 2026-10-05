@@ -32,11 +32,23 @@ logger = get_logger(__name__)
 
 
 def load_source(cfg: Config, dataset_name: str, llm_alias: str, **kw) -> QKVFieldDataset:
-    root = legacy.resolve_root(Path(cfg.data_root), dataset_name, llm_alias)
+    data_root = Path(cfg.data_root)
+    # dataset_name/llm_alias may differ from cfg's own (e.g. cross-LLM test()
+    # evaluates a checkpoint's dataset against another LLM's corpus) -- see
+    # Config.dataset_dir_for. `extract.pool` still comes from cfg: a
+    # pooling-ablation config must read its own pool_<mode> subtree regardless
+    # of which (dataset, llm) combination is being loaded.
+    native = cfg.dataset_dir_for(dataset_name, llm_alias, root=str(data_root))
+    root = legacy.resolve_root(
+        native, data_root, dataset_name, llm_alias,
+        is_default_pool=cfg.extract.pool == "mean",
+    )
     return QKVFieldDataset(
         root,
         max_tokens=cfg.extract.max_tokens,
         origin=f"{llm_alias}/{dataset_name}",
+        keep_channels=cfg.model.keep_channels,
+        token_buckets=cfg.model.token_buckets,
         **kw,
     )
 

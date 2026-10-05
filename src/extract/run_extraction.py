@@ -24,11 +24,37 @@ is already complete, this is detected from manifest.jsonl alone -- before
 load_examples() (may hit the network/HF hub) or load_llm() (loads the whole
 model onto a GPU) ever run -- so re-invoking `extract` on an already-finished
 (dataset, LLM) is cheap, not just correct.
+
+SHARED EXTRACTION ACROSS BASELINES
+-----------------------------------
+`methods` selects which reproducing_baselines/ pipeline(s) also get fed from
+this SAME generation call (default: qkv-steer only). Every method shares one
+greedy decode, one truncation pass (truncate_runon), and one BLEURT scoring
+pass -- the same response/label is never computed twice.
+
+  qkv-steer   Always on. The (T, L, M, 3) field above.
+  hallushift  Also captures hidden_states/attentions/logits per decode step
+              (capture_all(..., capture_generate_outputs=True)) and writes
+              src/extract/hallushift_features.build_hallushift_row's output
+              to {data_root}/hallushift/{dataset}/{llm_alias}/rows.jsonl, one
+              line per example -- reproducing_baselines/hallushift's own
+              functions.data_preparation / classifier.train_combined_model
+              consume this unmodified later (see run_training.py). Forces
+              extract.batch_size=1 and attn_implementation="eager" for the
+              WHOLE run (both are needed only for hallushift's capture, but
+              are applied whenever it's selected, not per-batch) -- see
+              capture_all's docstring for why eager/unbatched is required.
+  haloscope   Not implemented here yet -- HaloScope's own beam-search
+              "most_likely" generation and second-forward-pass hook-based
+              features are NOT the same computation as the shared greedy
+              pass, so they run as haloscope's own separate extra phase
+              (reproducing_baselines/haloscope/) rather than from this loop.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -37,6 +63,7 @@ import torch
 
 from src.config import Config
 from src.extract.datasets import load_examples
+from src.extract.hallushift_features import build_hallushift_row
 from src.extract.qkv_hooks import VIEWS, capture_all, left_pad_batch, read_geometry
 from src.extract.tensor_ops import PROJECTIONS, build_feature_field, pool_layer_axis
 from src.label.registry import label_examples
@@ -47,18 +74,32 @@ logger = get_logger(__name__)
 
 DTYPES = {"float16": torch.float16, "float32": torch.float32, "bfloat16": torch.bfloat16}
 
+#: Methods this extraction loop can feed directly from its own shared
+#: generation. "haloscope" is a recognised name (accepted by --methods so a
+#: single flag can request it) but is handled by its own separate script --
+#: see the module docstring.
+KNOWN_METHODS = ("qkv-steer", "hallushift", "haloscope")
+SHARED_GENERATION_METHODS = ("qkv-steer", "hallushift")
 
-def load_llm(cfg: Config):
+
+def load_llm(cfg: Config, require_eager_attention: bool = False):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     logger.info("loading %s", cfg.llm.name)
     tokenizer = AutoTokenizer.from_pretrained(cfg.llm.name)
+    extra_kwargs = {}
+    if require_eager_attention:
+        # output_attentions=True (needed for hallushift's captured attention
+        # tensors) requires eager attention -- fused kernels (SDPA/flash)
+        # don't materialize the full attention matrix at all. Otherwise Q/K/V
+        # come from forward hooks on the projection Linears, so the attention
+        # kernel choice does not affect what we capture; only requested here.
+        extra_kwargs["attn_implementation"] = "eager"
     model = AutoModelForCausalLM.from_pretrained(
         cfg.llm.name,
         dtype=DTYPES[cfg.llm.dtype],
         device_map="auto",
-        # Q/K/V come from forward hooks on the projection Linears, so the
-        # attention kernel choice does not affect what we capture.
+        **extra_kwargs,
     )
     model.eval()
     return model, tokenizer
@@ -85,6 +126,91 @@ def resolve_stop_tokens(tokenizer, model) -> list[int]:
     return sorted(ids)
 
 
+#: Matches a run-on generation rolling into a fabricated new "Q: ..." turn
+#: past the actual answer -- eos_token_id alone (resolve_stop_tokens) does not
+#: reliably stop these models on raw-text prompts (see run_extraction module
+#: docstring / prior corpus audit: ~75% of responses ran on without this cut).
+RUNON_RE = re.compile(r"\bQ:\s")
+
+#: A newline is ALSO treated as a run-on boundary: greedy generation that
+#: reaches the end of the real answer often drifts into a second paragraph
+#: ("...\n\nAnswer the question concisely.", commentary, a fabricated next
+#: turn that never happens to contain a literal "Q:") -- these were the
+#: residual run-on cases RUNON_RE alone missed (see the truthfulqa/opt_6.7b
+#: audit that found this gap). Cuts at whichever of "Q:" / "\n" comes first.
+NEWLINE_RE = re.compile(r"\n")
+
+
+def truncate_runon(gen_ids: torch.Tensor, tokenizer) -> tuple[torch.Tensor, str]:
+    """Cut a generated response at the first fabricated "Q:" turn OR the
+    first newline, whichever comes first, if either is present.
+
+    Operates on the ACTUAL generated ids (not a re-tokenized decode), so the
+    cut is always exact: no BPE re-merge can shift the boundary relative to
+    what capture_all's activations were recorded for. Finds the token count
+    by decoding a growing prefix of `gen_ids` and stopping once the decoded
+    text reaches the run-on marker's character offset in the full response.
+
+    A LEADING newline (Llama-2-family base models routinely emit one before
+    the real answer when continuing a raw "...A:" prompt, with no run-on
+    intent behind it) is skipped rather than treated as a cut: if nothing but
+    whitespace precedes the first marker, that leading whitespace is
+    consumed and the search resumes past it, so "\\nThe answer is Tsang."
+    keeps "The answer is Tsang." instead of the whole response being
+    discarded as empty (confirmed real case: truthfulqa/llama2_7b idx 432).
+    A "Q:" at position 0 is treated the same way (skip whitespace, retry) --
+    it is just as much "nothing real before this marker" as a leading
+    newline is, so it gets the same second chance.
+
+    Returns (kept_ids, kept_text). If no marker survives after skipping
+    leading whitespace, gen_ids/its full decode are returned unchanged
+    (n_keep == gen_ids.shape[0]). Returns (empty, "") only when there is
+    truly no non-whitespace content anywhere before EOS/max_tokens.
+    """
+    if gen_ids.numel() == 0:
+        return gen_ids, ""
+
+    full_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+    # How many leading characters are pure whitespace -- re.match anchors at
+    # position 0, so this is None unless the string STARTS with whitespace.
+    lead_ws = re.match(r"\s+", full_text)
+    search_from = lead_ws.end() if lead_ws else 0
+
+    q_match = RUNON_RE.search(full_text, search_from)
+    nl_match = NEWLINE_RE.search(full_text, search_from)
+    candidates = [m.start() for m in (q_match, nl_match) if m is not None]
+    if not candidates:
+        # No marker past the leading whitespace: either there was none, or
+        # everything after it is clean. Either way nothing to cut.
+        return gen_ids, full_text
+
+    cutoff_char = min(candidates)
+    n_total = gen_ids.shape[0]
+    for n in range(1, n_total + 1):
+        prefix_text = tokenizer.decode(gen_ids[:n], skip_special_tokens=True)
+        if len(prefix_text) >= cutoff_char:
+            kept_ids = gen_ids[: max(n - 1, 0)]
+            kept_text = tokenizer.decode(kept_ids, skip_special_tokens=True).rstrip()
+            if not kept_text:
+                # Marker appears essentially immediately: no real answer text
+                # precedes it, EVEN after skipping leading whitespace above
+                # (e.g. "\n\nQ: ..." with nothing between the two markers).
+                # Keep nothing rather than guess; the dataset loader drops
+                # n_tokens == 0 examples (see src/data/dataset.py).
+                return gen_ids[:0], ""
+            # `.rstrip()` can change the token count from `kept_ids` (BPE
+            # re-merge at the new trailing boundary) -- re-decode-consistent
+            # length by re-finding how many of kept_ids' own tokens survive
+            # once trailing whitespace-only tokens are dropped, rather than
+            # trusting len(kept_ids) against the stripped text.
+            m = len(kept_ids)
+            while m > 0 and tokenizer.decode(kept_ids[:m], skip_special_tokens=True).rstrip() != kept_text:
+                m -= 1
+            return kept_ids[:m], kept_text
+    return gen_ids, full_text
+
+
 def build_prompt_ids(prompt: str, tokenizer, device) -> torch.Tensor:
     """Tokenise a prompt to a (1, prompt_len) LongTensor of input ids.
 
@@ -107,6 +233,43 @@ def build_prompt_ids(prompt: str, tokenizer, device) -> torch.Tensor:
         out = out.unsqueeze(0)
 
     return out.to(device)
+
+
+def hallushift_dir(cfg: Config) -> Path:
+    """{data_root}/hallushift/{dataset}/{llm_alias}/ -- sibling to QKV-Steer's
+    own tree, not inside it: this is a different method's output, not a QKV
+    field, and reproducing_baselines/hallushift's training code (run via
+    run_training.py) only needs to know this one path convention."""
+    return Path(cfg.data_root) / "hallushift" / cfg.dataset.name / cfg.llm.alias
+
+
+def load_hallushift_rows(path: Path) -> dict[int, list]:
+    """{idx: row} for whatever a previous run already wrote to rows.jsonl.
+
+    Tolerates a truncated last line (a JSONL file killed mid-write by a
+    preemption/crash) by skipping it rather than raising -- that example is
+    simply regenerated.
+    """
+    rows: dict[int, list] = {}
+    if not path.exists():
+        return rows
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rows[rec["idx"]] = rec["row"]
+    return rows
+
+
+def append_hallushift_row(path: Path, idx: int, row: list) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"idx": idx, "row": row}) + "\n")
 
 
 def format_meta(prompt: str, response: str, gold, score: float, label: int) -> str:
@@ -220,10 +383,26 @@ def _manifest_complete_indices(root: Path) -> set[int]:
     return done
 
 
-def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = False) -> None:
-    """Generate responses and write the QKV feature field for one dataset+LLM."""
+def run_extraction(
+    cfg: Config,
+    chunk: int | None = None,
+    overwrite: bool = False,
+    methods: tuple[str, ...] = ("qkv-steer",),
+) -> None:
+    """Generate responses and write the QKV feature field for one dataset+LLM.
+
+    `methods` selects which reproducing_baselines/ pipeline(s) also get fed
+    from this same generation call -- see the module docstring.
+    """
+    unknown = set(methods) - set(KNOWN_METHODS)
+    if unknown:
+        raise ValueError(f"unknown method(s) {sorted(unknown)}; known: {KNOWN_METHODS}")
+    want_hallushift = "hallushift" in methods
+
     root = cfg.example_dir()
     root.mkdir(parents=True, exist_ok=True)
+    hs_dir = hallushift_dir(cfg)
+    hs_rows_path = hs_dir / "rows.jsonl"
 
     # Fastest possible pre-check, BEFORE load_examples()/load_llm() AND before
     # the slower per-example is_complete()/is_generated() scan further below:
@@ -234,10 +413,17 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
     # record count matches n_samples): an interrupted run whose manifest.jsonl
     # exists but is short needs --overwrite to redo.
     #
+    # SKIPPED when hallushift is requested: this fast-path only proves
+    # QKV-Steer's OWN output is complete, and a manifest built by a prior
+    # qkv-steer-only run has NO hallushift rows at all (hidden_states/
+    # attentions from that run's generation were never kept) -- there is no
+    # way to tell "is hallushift also done" without the slower per-example
+    # check below, which does verify both.
+    #
     # Chunked runs share one manifest.jsonl across chunks, so this check alone
     # can't tell whether THIS chunk's range is done -- chunked calls use the
     # (slower, but chunk-aware) index-set check instead.
-    if not overwrite and chunk is None:
+    if not overwrite and chunk is None and not want_hallushift:
         if (root / "manifest.jsonl").exists():
             logger.info(
                 "%s/%s: manifest.jsonl already exists -- treating as already "
@@ -246,7 +432,7 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
                 cfg.dataset.name, cfg.llm.alias,
             )
             return
-    elif not overwrite and chunk is not None:
+    elif not overwrite and chunk is not None and not want_hallushift:
         lo, hi = (chunk - 1) * 1000, chunk * 1000
         wanted = set(range(lo, hi))
         if wanted and wanted <= _manifest_complete_indices(root):
@@ -272,22 +458,29 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
 
     # Partition the work BEFORE touching the GPU. Generation is the only step
     # that needs the LLM; labeling + manifest do not.
-    #   complete    -> already labeled; skip entirely.
+    #   complete    -> already labeled (AND, if hallushift is requested, its
+    #                  row already exists); skip entirely.
     #   generated   -> tensor + response on disk but unlabeled; REUSE it (no
     #                  LLM), rebuild its record from meta.txt, let labeling
-    #                  finish it.
+    #                  finish it. Still requires hallushift's row to already
+    #                  exist when requested -- there is no way to recover
+    #                  hidden_states/attentions from a past run that never
+    #                  captured them, so a missing row forces regeneration.
     #   to_generate -> needs the model.
     # This is what lets a run whose generation finished but crashed before
     # labeling pick up at the post-generation step, without re-running the
     # model on 10k prompts.
+    hs_rows = load_hallushift_rows(hs_rows_path) if want_hallushift else {}
+
     reused: list[dict] = []
     to_generate = []
     skipped = 0
     for ex in examples:
         ex_dir = root / f"{ex.idx:05d}"
-        if not overwrite and is_complete(ex_dir):
+        hs_ok = (not want_hallushift) or (ex.idx in hs_rows)
+        if not overwrite and is_complete(ex_dir) and hs_ok:
             skipped += 1
-        elif not overwrite and is_generated(ex_dir):
+        elif not overwrite and is_generated(ex_dir) and hs_ok:
             reused.append(_record_from_meta(ex_dir, ex.idx))
         else:
             to_generate.append(ex)
@@ -299,15 +492,32 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
             "reusing %d already-generated (but unlabeled) examples: no re-generation",
             len(reused),
         )
+    if want_hallushift and to_generate:
+        n_missing_hs = sum(1 for ex in to_generate if ex.idx not in hs_rows)
+        if n_missing_hs:
+            logger.info(
+                "%d example(s) need (re)generation because their hallushift "
+                "row is missing (a prior qkv-steer-only extraction can't "
+                "supply it retroactively)",
+                n_missing_hs,
+            )
 
     records: list[dict] = list(reused)
 
     if to_generate:
-        model, tokenizer = load_llm(cfg)
+        model, tokenizer = load_llm(cfg, require_eager_attention=want_hallushift)
         geom = read_geometry(model)
         device = next(model.parameters()).device
         logger.info("model geometry: %s", geom)
-        logger.info("extraction batch_size: %d", cfg.extract.batch_size)
+
+        # hallushift needs hidden_states/attentions per decode step, which
+        # capture_all only supports for batch_size 1 (see its docstring) --
+        # forced here rather than left to the config, so a run started with
+        # --methods qkv-steer,hallushift can't silently keep an unrelated
+        # batch_size=8 and hit capture_all's ValueError deep into generation.
+        batch_size = 1 if want_hallushift else cfg.extract.batch_size
+        logger.info("extraction batch_size: %d%s", batch_size,
+                    " (forced to 1 for hallushift)" if want_hallushift else "")
 
         stop_ids = resolve_stop_tokens(tokenizer, model)
         logger.info(
@@ -348,10 +558,17 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
                     "n_segments": n_segments,
                     "n_rows": n_rows,
                     "projections": list(PROJECTIONS),
+                    "pool": cfg.extract.pool,
                 },
                 indent=2,
             )
         )
+
+        if want_hallushift:
+            hs_dir.mkdir(parents=True, exist_ok=True)
+            (hs_dir / "geometry.json").write_text(
+                json.dumps({"llm": cfg.llm.name, "num_layers": geom.n_layers}, indent=2)
+            )
 
         save_dtype = DTYPES[cfg.extract.dtype]
 
@@ -373,7 +590,6 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
         # without tailing a log full of generation internals.
         progress_log = (root / "progress.log").open("a")
         total_to_generate = len(to_generate)
-        batch_size = cfg.extract.batch_size
         batches = [
             to_generate[i : i + batch_size]
             for i in range(0, len(to_generate), batch_size)
@@ -392,16 +608,40 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
                 max_new_tokens=cfg.dataset.max_new_tokens,
                 eos_token_id=stop_ids,
                 attention_mask=attention_mask,
+                capture_generate_outputs=want_hallushift,
             )
 
-            for ex, (activations, gen_ids) in zip(batch, batch_out):
+            for ex, row_out in zip(batch, batch_out):
                 n_done += 1
+
+                if want_hallushift:
+                    activations, gen_ids, generate_outputs = row_out
+                else:
+                    activations, gen_ids = row_out
+                    generate_outputs = None
 
                 if gen_ids.numel() == 0:
                     logger.warning("example %d generated nothing; skipping", ex.idx)
                     continue
 
-                response = tokenizer.decode(gen_ids, skip_special_tokens=True)
+                # Cut a fabricated new "Q:" turn (or a plain newline -- see
+                # truncate_runon) before anything else: eos-only stopping
+                # (resolve_stop_tokens) does not reliably end these models'
+                # generations on raw-text prompts, so the field would
+                # otherwise carry activations for tokens the response text
+                # doesn't even end with. Slicing activations/generate_outputs
+                # here (by count, matching gen_ids) keeps `field[t]`,
+                # `response`'s t-th token, and hallushift's per-token features
+                # in exact correspondence, same as the max_tokens cut right
+                # below it.
+                kept_ids, response = truncate_runon(gen_ids, tokenizer)
+                n_keep = kept_ids.shape[0]
+                if n_keep < gen_ids.shape[0]:
+                    activations = {v: t[:n_keep] for v, t in activations.items()}
+                    if generate_outputs is not None:
+                        generate_outputs = {
+                            k: v[:n_keep] for k, v in generate_outputs.items()
+                        }
 
                 # Truncate to max_tokens BEFORE building the field: this caps
                 # both compute and disk. The response text is left whole so the
@@ -413,8 +653,14 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
                     activations = {
                         v: t[: cfg.extract.max_tokens] for v, t in activations.items()
                     }
+                    if generate_outputs is not None:
+                        generate_outputs = {
+                            k: v[: cfg.extract.max_tokens] for k, v in generate_outputs.items()
+                        }
 
-                field = build_feature_field(activations, n_segments=n_segments)
+                field = build_feature_field(
+                    activations, n_segments=n_segments, pool=cfg.extract.pool
+                )
                 if cfg.extract.l_eff is not None:
                     field = pool_layer_axis(field, cfg.extract.l_eff)
 
@@ -434,6 +680,15 @@ def run_extraction(cfg: Config, chunk: int | None = None, overwrite: bool = Fals
                         "gold": ex.gold,
                     }
                 )
+
+                if want_hallushift:
+                    # Same response/truncation as QKV-Steer's own record
+                    # above -- the label QKV-Steer computes below for this
+                    # exact (idx, response, gold) IS hallushift's label too;
+                    # run_training.py reads it back from manifest.jsonl by
+                    # idx rather than this loop scoring the response twice.
+                    hs_row = build_hallushift_row(generate_outputs, geom.n_layers, response)
+                    append_hallushift_row(hs_rows_path, ex.idx, hs_row)
 
                 if n_done % 100 == 0 or n_done == total_to_generate:
                     progress_log.write(f"{n_done}/{total_to_generate}\n")

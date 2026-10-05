@@ -30,31 +30,65 @@ import torch
 #: writes one back.
 PROJECTIONS = ("Q", "K", "V")
 
+#: Segment-pooling strategies, for the pooling ablation (QKV-Lens Table 3).
+#: `mean` is the paper's canonical, fixed setting (see module docstring) --
+#: the others exist ONLY to reproduce that ablation, never for steering: a
+#: field built under max/strided is not the coordinate system the steering
+#: stage's broadcast assumes.
+#:   mean     average of each contiguous S-wide chunk (the paper's Eq. 4).
+#:   max      peak value of each chunk.
+#:   strided  every Sth dimension, i.e. raw[..., 0], raw[..., S], raw[..., 2S],
+#:            ... -- true subsampling, not a pooled reduction.
+POOL_MODES = ("mean", "max", "strided")
+
 
 def mean_pool_segments(raw: torch.Tensor, n_segments: int) -> torch.Tensor:
     """Reduce the feature axis D to `n_segments` by mean-pooling contiguous chunks.
 
+    Thin wrapper around `pool_segments(raw, n_segments, mode="mean")`, kept as
+    its own name because `mean` is the paper's one fixed, non-ablated setting
+    (see module docstring) -- every call site that builds a real feature field
+    for training/steering should read as "the canonical pooling", not as one
+    mode among several.
+    """
+    return pool_segments(raw, n_segments, mode="mean")
+
+
+def pool_segments(raw: torch.Tensor, n_segments: int, mode: str = "mean") -> torch.Tensor:
+    """Reduce the feature axis D to `n_segments` by pooling or subsampling.
+
     Args:
         raw:        (..., D) tensor, typically (T, L, D).
         n_segments: number of output segments M. D must be divisible by M.
+        mode:       one of POOL_MODES. `mean` is the paper's fixed setting
+                    (Eq. 4); `max` and `strided` exist only for the pooling
+                    ablation (QKV-Lens Table 3) -- see POOL_MODES.
 
     Returns:
         (..., n_segments)
 
-    Segment m covers `raw[..., m*S : (m+1)*S]` where S = D // M, matching the
-    paper's Eq. 4:  q_{t,l,m} = (1/S) * sum_j Q^{(l)}_{t,(m-1)S+j}.
+    For the contiguous modes (mean, max), segment m covers
+    `raw[..., m*S : (m+1)*S]` where S = D // M. `strided` instead takes
+    `raw[..., m*S]` -- one representative dimension per stride, not an
+    aggregate -- so its segment m means something different from the other
+    two modes' segment m even though the shapes match.
 
     Divisibility is required, not worked around: a ragged final segment would
-    average a different number of dimensions than the others, so segment m would
-    no longer mean the same thing across m -- and the steering broadcast assumes
-    every segment covers exactly S dimensions.
+    cover a different number of source dimensions than the others, so segment
+    m would no longer mean the same thing across m -- and the steering
+    broadcast (mean/max modes only -- see `mean_pool_segments`) assumes every
+    segment covers exactly S dimensions.
 
     For Llama-3-8B the Q projection has D=4096 (32 heads x head_dim 128), so at
     M=32 the segments coincide exactly with attention heads and segment m is
-    "the mean activation of head m". That alignment is a happy accident of the
-    architecture, NOT something enforced -- under GQA the K/V projections have
-    D=1024 and pooling those to 32 segments splits each kv-head across 4.
+    "the mean/max/first-element activation of head m". That alignment is a
+    happy accident of the architecture, NOT something enforced -- under GQA
+    the K/V projections have D=1024 and pooling those to 32 segments splits
+    each kv-head across 4.
     """
+    if mode not in POOL_MODES:
+        raise ValueError(f"pool mode must be one of {POOL_MODES}, got {mode!r}")
+
     d = raw.shape[-1]
     if n_segments <= 0:
         raise ValueError(f"n_segments must be positive, got {n_segments}")
@@ -65,12 +99,20 @@ def mean_pool_segments(raw: torch.Tensor, n_segments: int) -> torch.Tensor:
         )
 
     segment_size = d // n_segments
+
+    if mode == "strided":
+        # Every Sth dimension, starting at 0: a true subsample, not a
+        # reduction over each chunk.
+        return raw[..., ::segment_size][..., :n_segments]
+
     chunked = raw.reshape(*raw.shape[:-1], n_segments, segment_size)
+    if mode == "max":
+        return chunked.amax(dim=-1)
     return chunked.mean(dim=-1)
 
 
 def build_feature_field(
-    activations: dict[str, torch.Tensor], n_segments: int
+    activations: dict[str, torch.Tensor], n_segments: int, pool: str = "mean"
 ) -> torch.Tensor:
     """Q/K/V raw activations -> the paper's feature field (T, L, M, 3).
 
@@ -79,6 +121,10 @@ def build_feature_field(
             K and V are narrower than Q under GQA; each is pooled to the same
             M independently, so the three stack cleanly.
         n_segments:  M, the number of pooled segments per layer.
+        pool:        one of POOL_MODES. `mean` (default) is the paper's fixed
+            setting; `max`/`strided` exist only for the pooling ablation
+            (QKV-Lens Table 3) and produce a field OUTSIDE the coordinate
+            system the steering stage assumes -- see POOL_MODES.
 
     Returns:
         (T, L, M, 3), channels ordered as `PROJECTIONS` (Q, K, V).
@@ -93,7 +139,7 @@ def build_feature_field(
         # Pool in float32: the captured activations may be fp16, where a mean
         # over a 128-element chunk loses precision at the top of the range.
         # Cast back at save time.
-        per_projection.append(mean_pool_segments(raw.float(), n_segments))
+        per_projection.append(pool_segments(raw.float(), n_segments, mode=pool))
 
     n_tokens = {p.shape[0] for p in per_projection}
     if len(n_tokens) != 1:
