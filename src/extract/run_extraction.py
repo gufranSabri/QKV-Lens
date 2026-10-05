@@ -27,7 +27,7 @@ model onto a GPU) ever run -- so re-invoking `extract` on an already-finished
 
 SHARED EXTRACTION ACROSS BASELINES
 -----------------------------------
-`methods` selects which reproducing_baselines/ pipeline(s) also get fed from
+`methods` selects which scripts/reproducing_baselines/ pipeline(s) also get fed from
 this SAME generation call (default: qkv-steer only). Every method shares one
 greedy decode, one truncation pass (truncate_runon), and one BLEURT scoring
 pass -- the same response/label is never computed twice.
@@ -37,9 +37,9 @@ pass -- the same response/label is never computed twice.
               (capture_all(..., capture_generate_outputs=True)) and writes
               src/extract/hallushift_features.build_hallushift_row's output
               to {data_root}/hallushift/{dataset}/{llm_alias}/rows.jsonl, one
-              line per example -- reproducing_baselines/hallushift's own
+              line per example -- scripts/reproducing_baselines/hallushift's own
               functions.data_preparation / classifier.train_combined_model
-              consume this unmodified later (see run_training.py). Forces
+              consume this unmodified later (see scripts/run_training.py). Forces
               extract.batch_size=1 and attn_implementation="eager" for the
               WHOLE run (both are needed only for hallushift's capture, but
               are applied whenever it's selected, not per-batch) -- see
@@ -48,7 +48,7 @@ pass -- the same response/label is never computed twice.
               "most_likely" generation and second-forward-pass hook-based
               features are NOT the same computation as the shared greedy
               pass, so they run as haloscope's own separate extra phase
-              (reproducing_baselines/haloscope/) rather than from this loop.
+              (scripts/reproducing_baselines/haloscope/) rather than from this loop.
 """
 
 from __future__ import annotations
@@ -238,8 +238,8 @@ def build_prompt_ids(prompt: str, tokenizer, device) -> torch.Tensor:
 def hallushift_dir(cfg: Config) -> Path:
     """{data_root}/hallushift/{dataset}/{llm_alias}/ -- sibling to QKV-Steer's
     own tree, not inside it: this is a different method's output, not a QKV
-    field, and reproducing_baselines/hallushift's training code (run via
-    run_training.py) only needs to know this one path convention."""
+    field, and scripts/reproducing_baselines/hallushift's training code (run via
+    scripts/run_training.py) only needs to know this one path convention."""
     return Path(cfg.data_root) / "hallushift" / cfg.dataset.name / cfg.llm.alias
 
 
@@ -391,7 +391,7 @@ def run_extraction(
 ) -> None:
     """Generate responses and write the QKV feature field for one dataset+LLM.
 
-    `methods` selects which reproducing_baselines/ pipeline(s) also get fed
+    `methods` selects which scripts/reproducing_baselines/ pipeline(s) also get fed
     from this same generation call -- see the module docstring.
     """
     unknown = set(methods) - set(KNOWN_METHODS)
@@ -685,7 +685,7 @@ def run_extraction(
                     # Same response/truncation as QKV-Steer's own record
                     # above -- the label QKV-Steer computes below for this
                     # exact (idx, response, gold) IS hallushift's label too;
-                    # run_training.py reads it back from manifest.jsonl by
+                    # scripts/run_training.py reads it back from manifest.jsonl by
                     # idx rather than this loop scoring the response twice.
                     hs_row = build_hallushift_row(generate_outputs, geom.n_layers, response)
                     append_hallushift_row(hs_rows_path, ex.idx, hs_row)

@@ -91,11 +91,11 @@ def main(argv=None) -> int:
                       help="re-extract examples that already have tokens.npy")
     p_ex.add_argument(
         "--methods", default="qkv-steer",
-        help="comma-separated: which reproducing_baselines/ pipeline(s) to also "
+        help="comma-separated: which scripts/reproducing_baselines/ pipeline(s) to also "
              "feed from this SAME generation (default: qkv-steer only). "
              "'hallushift' adds hidden_states/attentions capture and forces "
              "batch_size=1 + eager attention for the whole run. 'haloscope' is "
-             "accepted but NOT extracted here -- see reproducing_baselines/"
+             "accepted but NOT extracted here -- see scripts/reproducing_baselines/"
              "haloscope's own script for its separate beam-search generation.",
     )
 

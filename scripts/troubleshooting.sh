@@ -27,14 +27,15 @@ module load StdEnv/2023 gcc/12.3 cuda/13.2 arrow/23.0.1 python/3.11.5
 virtualenv --no-download $SLURM_TMPDIR/env
 source $SLURM_TMPDIR/env/bin/activate
 
+# HF_TOKEN must already be set in your environment -- never hardcode a
+# token here.
 export PYTHONDONTWRITEBYTECODE=1
 export HF_HUB_DISABLE_XET=1
 export TF_CPP_MIN_LOG_LEVEL=3
-export HF_TOKEN=REDACTED_HF_TOKEN
 export HF_HOME=/home/ahmedubc/scratch/hf_cache
 
 # Core deps only -- enough for the ACT-ViT comparison (exact_match labels):
-bash scripts/install.sh --bleurt
+bash scripts/install.sh
 
 # ...OR with BLEURT, required for the HalluShift comparison. Adds TensorFlow-CPU
 # and downloads the ~1.5GB BLEURT-20-D12 checkpoint into models/ (cached, so
@@ -45,7 +46,6 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available(), '|', torch.cu
 
 
 bash all-datasets_extract.sh
-bash single-dataset_ablation.sh
 
 # ══════════════════════════════════════════════════════════════════════════
 # SINGLE CONFIG, STEP BY STEP

@@ -70,9 +70,10 @@ would then write into a different space than the one the detector looked at.
 
 Configs that use a removed QKV-Lens option fail loudly with the reason
 (see `_REMOVED_KEYS` in `src/config.py`). Removed: `extract.source`,
-`extract.extraction_type`, `extract.views`, `extract.pool`,
-`extract.boundary_mode`, `extract.n_cols` (now `n_segments`), `model.channels`,
-`model.include`, `model.fusion`, `model.share_backbone`, `model.fused_dim`.
+`extract.extraction_type`, `extract.views`, `extract.boundary_mode`,
+`extract.n_cols` (now `n_segments`), `model.channels`, `model.include`,
+`model.fusion`, `model.share_backbone`, `model.fused_dim`. `extract.pool`
+is NOT removed — it's the one opt-in pooling-ablation knob (see `src/config.py`).
 
 ## Usage
 
@@ -132,27 +133,27 @@ bash scripts/experiments/run_all_baselines.sh
 
 | Baseline | Where it comes from | Status |
 |---|---|---|
-| Perplexity | `reproducing_baselines/perplexity.txt` | run here |
-| Lexical Similarity | `reproducing_baselines/lexical_similarity/` (Lin et al., TMLR 2024) | run here |
-| SelfCheckGPT-NLI | `reproducing_baselines/selfcheckgpt/` (Manakul et al., 2023) | run here |
-| Semantic Entropy | `reproducing_baselines/semantic_uncertainty/` (Kuhn et al., 2023) | run here |
-| Verbalize | `reproducing_baselines/verbalize.pdf` (Lin et al., 2022) | run here |
-| Self-Evaluation | `reproducing_baselines/selv-evaluation.pdf` (Kadavath et al., 2022) | run here |
-| HalluShift | `run_training.py --methods hallushift` | already run |
+| Perplexity | `scripts/reproducing_baselines/perplexity.txt` | run here |
+| Lexical Similarity | `scripts/reproducing_baselines/lexical_similarity/` (Lin et al., TMLR 2024) | run here |
+| SelfCheckGPT-NLI | `scripts/reproducing_baselines/selfcheckgpt/` (Manakul et al., 2023) | run here |
+| Semantic Entropy | `scripts/reproducing_baselines/semantic_uncertainty/` (Kuhn et al., 2023) | run here |
+| Verbalize | `scripts/reproducing_baselines/verbalize.pdf` (Lin et al., 2022) | run here |
+| Self-Evaluation | `scripts/reproducing_baselines/selv-evaluation.pdf` (Kadavath et al., 2022) | run here |
+| HalluShift | `scripts/run_training.py --methods hallushift` | already run |
 | HaloScope, CCS | -- | out of scope; HaloScope is cited, not measured |
 
 Protocol details for the six come from
-`reproducing_baselines/main_instruction.txt`, which fixes the sampling setting
-(10 generations at temperature 0.5) and the exact Verbalize / Self-Evaluation
-prompts.
+`scripts/reproducing_baselines/main_instruction.txt`, which fixes the sampling
+setting (10 generations at temperature 0.5) and the exact Verbalize /
+Self-Evaluation prompts.
 
 **They are run on our own generations, not their own.** Nothing is
 regenerated: each baseline scores the greedy responses already in
 `{data_root}/{dataset}/{llm_alias}/*/meta.txt`, against the BLEURT labels
 already in `manifest.jsonl`, on the test indices already in
 `{runs_root}/{llm_alias}_{dataset}/split.json` -- the same partition
-`src/train.py` gave QKV-Steer and `run_training.py` gave HalluShift. That is
-what makes the AUROC column comparable down the whole table.
+`src/train.py` gave QKV-Steer and `scripts/run_training.py` gave HalluShift.
+That is what makes the AUROC column comparable down the whole table.
 
 Three stages, each resumable, under `scripts/baselines/`:
 

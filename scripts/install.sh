@@ -51,7 +51,7 @@ echo "[install] core dependencies OK"
 # Only needed by scripts/experiments/run_all_baselines.sh. Kept behind a flag so an
 # extraction/training allocation does not pay for them.
 # Two of these baselines run the ORIGINAL authors' code straight out of
-# reproducing_baselines/ (see scripts/baselines/upstream.py), so this installs
+# scripts/reproducing_baselines/ (see scripts/baselines/upstream.py), so this installs
 # what THEIR modules import at load time, not just what the scoring needs:
 #   spacy         selfcheckgpt/modeling_selfcheck.py imports it at module
 #                 level; it is also the sentence splitter their README uses.
@@ -101,8 +101,12 @@ fi
 # BLEURT is a git install, so it can NOT come from the offline wheelhouse --
 # these two lines deliberately drop $PIP_FLAGS and hit the network.
 #
-# tensorflow-CPU on purpose: the GPU build reserves VRAM at import and collides
-# with the torch CUDA context during extraction.
+# tensorflow-CPU is preferred: the GPU build reserves VRAM at import and
+# collides with the torch CUDA context during extraction. NOTE: the
+# `pip install tensorflow-cpu` pre-install that would guarantee this is
+# currently commented out below, so `pip install ./bleurt` is free to pull
+# in plain (GPU) tensorflow via its own setup.py deps -- known gap, not
+# fixed here.
 if [ "$WITH_BLEURT" -eq 1 ]; then
   echo "[install] BLEURT (TensorFlow-CPU)"
 

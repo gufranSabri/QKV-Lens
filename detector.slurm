@@ -20,21 +20,14 @@ module load StdEnv/2023 gcc/12.3 cuda/13.2 arrow/23.0.1 python/3.11.5
 virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 
+# HF_TOKEN must be set by the caller's environment (e.g. exported in
+# ~/.bashrc or passed via `sbatch --export`) -- never hardcode a token here.
 export PYTHONDONTWRITEBYTECODE=1
 export HF_HUB_DISABLE_XET=1
 export TF_CPP_MIN_LOG_LEVEL=3
 export HF_HOME=/home/ahmedubc/scratch/hf_cache
-export HF_TOKEN=REDACTED_HF_TOKEN
 
 bash scripts/install.sh --bleurt --baselines || exit 1
 
-# bash all-datasets_extract.sh
+bash all-datasets_extract.sh
 bash all-datasets_run.sh
-
-# DATASETS=coqa MODELS=llama2_7b BATCH=2 bash scripts/experiments/run_all_baselines.sh 
-# RERUN=1 DATASETS=coqa MODELS=opt_6.7b BATCH=2 bash scripts/experiments/run_all_baselines.sh
-
-
-python detector.py --config configs/coqa/opt_6.7b.yaml train --run-name opt_6.7b_coqa
-python detector.py --config configs/coqa/opt_6.7b.yaml test --checkpoint runs/opt_6.7b_coqa/best.pt --dataset coqa
-DATASETS=coqa MODELS=opt_6.7b BATCH=2 bash scripts/experiments/run_all_baselines.sh

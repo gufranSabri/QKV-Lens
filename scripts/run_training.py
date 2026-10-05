@@ -10,7 +10,7 @@ OWN training code (this script only dispatches, it does not reimplement any
 method):
 
     qkv-steer   src/train.train -- the (T,L,M,3) field, CNN detector.
-    hallushift  reproducing_baselines/hallushift/classifier.train_combined_model
+    hallushift  scripts/reproducing_baselines/hallushift/classifier.train_combined_model
                 -- rows written by `detector.py extract --methods ...,hallushift`
                 (see src/extract/run_extraction.py), reusing QKV-Steer's own
                 train/test split (see build_hallushift_dataframe below) so
@@ -31,9 +31,10 @@ import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent
+SCRIPTS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPTS_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "reproducing_baselines" / "hallushift"))
+sys.path.insert(0, str(SCRIPTS_DIR / "reproducing_baselines" / "hallushift"))
 
 from src.config import load_config  # noqa: E402
 from src.extract.run_extraction import hallushift_dir  # noqa: E402
@@ -151,8 +152,8 @@ def build_hallushift_dataframe(rows_path: Path, manifest_path: Path):
     """
     import pandas as pd
 
-    sys.path.insert(0, str(REPO_ROOT / "reproducing_baselines" / "hallushift"))
-    import functions  # reproducing_baselines/hallushift/functions.py
+    sys.path.insert(0, str(SCRIPTS_DIR / "reproducing_baselines" / "hallushift"))
+    import functions  # scripts/reproducing_baselines/hallushift/functions.py
 
     rows_by_idx: dict[int, list] = {}
     with open(rows_path) as f:
@@ -201,7 +202,7 @@ def build_hallushift_dataframe(rows_path: Path, manifest_path: Path):
 def train_hallushift(cfg, dataset_name: str, qkv_run_dir: Path) -> dict:
     import torch
 
-    sys.path.insert(0, str(REPO_ROOT / "reproducing_baselines" / "hallushift"))
+    sys.path.insert(0, str(SCRIPTS_DIR / "reproducing_baselines" / "hallushift"))
     import classifier
 
     hs_dir = hallushift_dir(cfg)

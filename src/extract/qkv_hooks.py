@@ -360,7 +360,7 @@ def capture_all(
             excluded from attention.
         capture_generate_outputs: also request hidden_states/attentions/logits
             on every decode-step forward pass (needed by baselines other than
-            QKV-Steer's own Q/K/V field, e.g. reproducing_baselines/hallushift's
+            QKV-Steer's own Q/K/V field, e.g. scripts/reproducing_baselines/hallushift's
             per-token Wasserstein/cosine/probability features). Off by default:
             output_attentions requires attn_implementation="eager" and returns
             a full (B, heads, seq_len, seq_len) tensor every step, so this is

@@ -1,5 +1,5 @@
 """HalluShift's own per-token feature computation, ported from
-reproducing_baselines/hallushift/functions.py's plot_internal_state_2 /
+scripts/reproducing_baselines/hallushift/functions.py's plot_internal_state_2 /
 probability_function -- WITH the performance fix from the earlier standalone
 HalluShift run (lost when that repo was recloned fresh; reapplied here since
 this module now owns that computation for the shared pipeline).
@@ -19,10 +19,10 @@ with max abs error ~3e-8 (float32 rounding) vs the original scipy-based
 result. See that investigation for the full profiling trail.
 
 Output shape matches HalluShift's own `result` row exactly (module docstring
-in reproducing_baselines/hallushift/hal_detection.py's process_row):
+in scripts/reproducing_baselines/hallushift/hal_detection.py's process_row):
     plot_internal_state_2(hidden) + plot_internal_state_2(attention)
     + probability_function(logits) + [decoded_response]
-so reproducing_baselines/hallushift/functions.data_preparation and
+so scripts/reproducing_baselines/hallushift/functions.data_preparation and
 classifier.train_combined_model consume it completely unmodified -- this
 module only changes how the raw generation is obtained, never HalluShift's
 own method code.
@@ -115,7 +115,7 @@ def probability_function(step_logits: tuple) -> list[list[float]]:
 
 def build_hallushift_row(generate_outputs: dict, num_layers: int, response: str) -> list:
     """One HalluShift `result` row for a single example -- the exact
-    concatenation reproducing_baselines/hallushift/hal_detection.py's
+    concatenation scripts/reproducing_baselines/hallushift/hal_detection.py's
     process_row builds from a real model.generate() call, but from
     capture_all(..., capture_generate_outputs=True)'s captured per-step
     outputs instead.

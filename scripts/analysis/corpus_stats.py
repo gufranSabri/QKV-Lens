@@ -80,7 +80,7 @@ def stats_for_pair(dataset: str, llm_alias: str, root: Path) -> dict:
 #: Each is some METHOD's own output, laid out as {method}/{dataset}/{llm_alias}
 #: with no manifest.jsonl -- walking one as a dataset would read its {dataset}
 #: dirs as "models" and either crash or silently emit garbage rows.
-#: "hallushift" is reproducing_baselines/hallushift's; the rest are the
+#: "hallushift" is scripts/reproducing_baselines/hallushift's; the rest are the
 #: training-free baselines' (scripts/baselines/common.method_dir and
 #: shared_dir), which is why the list is imported from there rather than
 #: restated -- adding a baseline must not silently corrupt this report.
