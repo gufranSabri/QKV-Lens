@@ -47,7 +47,7 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 #: "flat_mlp" is the main approach; "scratch_cnn" (BAFE, the original QKV-Lens
 #: CNN) is the structure-preservation ablation's "with spatial structure" arm
 #: -- see src/models/backbones/flat_mlp.py's docstring.
-VALID_BACKBONES = ("flat_mlp", "scratch_cnn")
+VALID_BACKBONES = ("flat_mlp", "scratch_cnn", "conv_segment")
 VALID_SCHEMES = ("exact_match", "bleurt")
 #: extract.source: which field train/test/cam/forecasting load -- "qkv" (the
 #: paper's (T,L,M,3) field) or "hidden-states" ((T,L,M,1), the representation

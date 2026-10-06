@@ -151,7 +151,11 @@ def build_feature_field(
     return torch.stack(per_projection, dim=-1)  # (T, L, M, 3)
 
 
-def stack_hidden_states(hidden_states: tuple[tuple[torch.Tensor, ...], ...]) -> torch.Tensor:
+def stack_hidden_states(
+    hidden_states: tuple[tuple[torch.Tensor, ...], ...],
+    n_layers: int | None = None,
+    hidden_size: int | None = None,
+) -> torch.Tensor:
     """generate_outputs["hidden_states"] (capture_all's shape, matching
     transformers' GenerateDecoderOnlyOutput.hidden_states exactly) -> (T, L, D).
 
@@ -165,12 +169,28 @@ def stack_hidden_states(hidden_states: tuple[tuple[torch.Tensor, ...], ...]) -> 
             QKV field's L axis means -- keeping the two fields' L coordinate
             comparable is the whole point of extracting hidden states through
             the SAME shared generation pass as QKV.
+        n_layers, hidden_size: the model's own geometry (ModelGeometry.n_layers
+            / .hidden_size), used ONLY for the T=0 case below -- an empty
+            `hidden_states` tuple still needs a well-formed (0, L, D) return
+            (not just a bare torch.empty(0)), because downstream
+            build_hidden_states_field, and the QKV path's analogous
+            build_feature_field, both expect every raw tensor to be
+            3-dimensional even when T happens to be 0 (a response fully
+            consumed by run-on truncation -- see run_extraction.py's
+            `n_keep == 0` case). Required whenever `hidden_states` is empty;
+            omit them only when it is known to be non-empty.
 
     Returns:
         (T, L, D) float32, L = the model's transformer layer count (not L+1).
     """
     if not hidden_states:
-        return torch.empty(0)
+        if n_layers is None or hidden_size is None:
+            raise ValueError(
+                "stack_hidden_states: hidden_states is empty, so n_layers "
+                "and hidden_size are required to build a well-formed "
+                "(0, L, D) tensor (see this function's docstring)."
+            )
+        return torch.empty(0, n_layers, hidden_size, dtype=torch.float32)
     per_step = []
     for step in hidden_states:
         # step[0] is the embedding layer; step[1:] are the L transformer

@@ -40,7 +40,7 @@ bash scripts/install.sh
 # ...OR with BLEURT, required for the HalluShift comparison. Adds TensorFlow-CPU
 # and downloads the ~1.5GB BLEURT-20-D12 checkpoint into models/ (cached, so
 # later allocations reuse it). It self-tests and fails loudly if broken.
-# bash scripts/install.sh --bleurt
+bash scripts/install.sh --bleurt
 
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), '|', torch.cuda.get_device_name())"
 

@@ -917,7 +917,9 @@ def run_hidden_states_extraction(cfg: Config, overwrite: bool = False) -> None:
         if cfg.extract.max_tokens and len(hidden) > cfg.extract.max_tokens:
             hidden = hidden[: cfg.extract.max_tokens]
 
-        hidden_tlD = stack_hidden_states(hidden)  # (T, L, D)
+        hidden_tlD = stack_hidden_states(
+            hidden, n_layers=geom.n_layers, hidden_size=geom.hidden_size
+        )  # (T, L, D)
         field = build_hidden_states_field(hidden_tlD, n_segments=n_segments, pool=cfg.extract.pool)
         if cfg.extract.l_eff is not None:
             field = pool_layer_axis(field, cfg.extract.l_eff)
@@ -940,6 +942,41 @@ def run_hidden_states_extraction(cfg: Config, overwrite: bool = False) -> None:
     _label_and_write_manifest(cfg, root, records)
 
 
+def _qkv_labels_by_idx(cfg: Config) -> dict[int, dict]:
+    """{idx: {"response": ..., "score": ..., "label": ...}} from the QKV
+    corpus's OWN manifest + meta.txt files, for the SAME (dataset, llm) --
+    cfg.example_dir() always resolves to the QKV tree regardless of
+    cfg.extract.source (it keys off extract.pool/n_segments, not source; see
+    Config.dataset_dir_for). Empty dict if that corpus hasn't been extracted
+    (or labeled) yet -- callers treat that as "nothing to copy", not an error.
+    """
+    root = cfg.example_dir()
+    manifest = root / "manifest.jsonl"
+    if not manifest.exists():
+        return {}
+
+    out: dict[int, dict] = {}
+    with open(manifest) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            label = str(rec.get("label", "")).strip()
+            if label not in ("0", "1"):
+                continue  # QKV example itself isn't labeled yet -- nothing to copy
+            try:
+                meta = parse_meta(root / rec["dir"] / "meta.txt")
+            except OSError:
+                continue
+            out[rec["idx"]] = {
+                "response": meta.get("response", ""),
+                "score": float(rec.get("score", "nan")),
+                "label": int(label),
+            }
+    return out
+
+
 def _label_and_write_manifest(cfg: Config, root: Path, records: list[dict]) -> None:
     """Shared tail of run_hidden_states_extraction: label every record (both
     freshly-generated and reused-but-unlabeled ones are mixed into `records`
@@ -947,17 +984,66 @@ def _label_and_write_manifest(cfg: Config, root: Path, records: list[dict]) -> N
     write the manifest. Factored out so the "nothing left to generate, only
     reused examples need labeling" early-return path and the normal
     post-generation path run the exact same labeling/manifest logic.
+
+    LABELS ARE COPIED FROM THE QKV CORPUS, NOT RECOMPUTED, whenever possible:
+    QKV and hidden-states extraction share the identical greedy-decode
+    generation (same prompts, same model, same stop tokens, same
+    truncate_runon -- see the module docstring), so for the SAME idx they
+    produce the SAME response, which means the SAME BLEURT label -- running
+    BLEURT a second time on identical text would be pure waste. Verified per
+    example by comparing the stored response text, not assumed: an idx
+    missing from the QKV corpus, or one whose response text differs (a real
+    divergence -- e.g. a different cfg.extract.max_tokens/truncate point
+    between the two runs), falls back to running this scheme's own labeler
+    on just that example, with a loud warning either way.
     """
     if not records:
         logger.warning("no new examples extracted")
         return
 
-    logger.info("labeling %d examples with scheme=%s", len(records), cfg.labeling.scheme)
-    scored = label_examples(cfg, [r["response"] for r in records], [r["gold"] for r in records])
-    for rec, (score, label) in zip(records, scored):
-        rec["score"], rec["label"] = score, label
+    qkv_labels = _qkv_labels_by_idx(cfg)
+    if not qkv_labels:
+        logger.warning(
+            "no labeled QKV corpus found at %s -- labeling all %d hidden-states "
+            "example(s) with scheme=%s instead of copying (expected if the QKV "
+            "corpus for this (dataset, llm) hasn't been extracted/labeled yet)",
+            cfg.example_dir(), len(records), cfg.labeling.scheme,
+        )
+
+    to_recompute: list[dict] = []
+    n_copied = 0
+    for rec in records:
+        qkv = qkv_labels.get(rec["idx"])
+        if qkv is not None and qkv["response"] == rec["response"]:
+            rec["score"], rec["label"] = qkv["score"], qkv["label"]
+            n_copied += 1
+        else:
+            if qkv is not None:
+                logger.warning(
+                    "idx %d: QKV and hidden-states responses differ -- "
+                    "relabeling this example instead of copying "
+                    "(QKV extraction and this run may have used different "
+                    "extract.max_tokens or other generation settings)",
+                    rec["idx"],
+                )
+            to_recompute.append(rec)
+
+    if n_copied:
+        logger.info("copied %d label(s) from the QKV corpus (no BLEURT re-run)", n_copied)
+    if to_recompute:
+        logger.info(
+            "labeling %d example(s) with scheme=%s (no matching QKV label found)",
+            len(to_recompute), cfg.labeling.scheme,
+        )
+        scored = label_examples(
+            cfg, [r["response"] for r in to_recompute], [r["gold"] for r in to_recompute]
+        )
+        for rec, (score, label) in zip(to_recompute, scored):
+            rec["score"], rec["label"] = score, label
+
+    for rec in records:
         (root / rec["dir"] / "meta.txt").write_text(
-            format_meta(rec["prompt"], rec["response"], rec["gold"], score, label),
+            format_meta(rec["prompt"], rec["response"], rec["gold"], rec["score"], rec["label"]),
             encoding="utf-8",
         )
 

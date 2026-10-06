@@ -58,3 +58,5 @@ for DATASET in "${DATASETS[@]}"; do
 
     done
 done
+
+python detector.py --config configs/triviaqa/llama3.1_8b.yaml train --run-name "test" --set model.backbone=conv_segment
