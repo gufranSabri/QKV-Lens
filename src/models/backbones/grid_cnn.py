@@ -1,4 +1,6 @@
-"""ScratchCNN: a small ResNet-style backbone trained from scratch."""
+# Structure-preservation ablation arm: a small from-scratch ResNet mixing
+# JOINTLY across the layer axis (L) and the segment axis (M). Contrast
+# LayerCNN, which mixes L only.
 
 from __future__ import annotations
 
@@ -14,7 +16,6 @@ class ResBlock(nn.Module):
         self.bn2 = nn.BatchNorm2d(out_ch)
         self.act = nn.GELU()
 
-        # Projection shortcut when shape changes, identity otherwise.
         if stride != 1 or in_ch != out_ch:
             self.short = nn.Sequential(
                 nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
@@ -29,18 +30,7 @@ class ResBlock(nn.Module):
         return self.act(out + self.short(x))
 
 
-class ScratchCNN(nn.Module):
-    """A small ResNet-style stack built for L x M activation maps.
-
-    Trained from scratch on purpose: QKV feature fields share essentially no
-    low-level statistics with natural photographs, so ImageNet's edge/colour
-    filters are a weak prior here.
-
-    This is the paper's Bi-Axial Feature Encoder (BAFE): 3x3 convolutions with
-    batch norm and GELU, operating jointly over the transformer-layer axis (L)
-    and the pooled-segment axis (M).
-    """
-
+class GridCNN(nn.Module):
     def __init__(self, embed_dim: int = 128, dropout: float = 0.0, in_ch: int = 3):
         super().__init__()
         self.stem = nn.Sequential(
@@ -58,7 +48,7 @@ class ScratchCNN(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.embed_dim = embed_dim
 
-    def forward(self, x):                     # x: (N, 3, L, M)
+    def forward(self, x):                     # x: (N, in_ch, L, M)
         x = self.stem(x)
         x = self.blocks(x)
         x = self.pool(x).flatten(1)           # (N, 128)

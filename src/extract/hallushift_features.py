@@ -1,32 +1,16 @@
-"""HalluShift's own per-token feature computation, ported from
-scripts/reproducing_baselines/hallushift/functions.py's plot_internal_state_2 /
-probability_function -- WITH the performance fix from the earlier standalone
-HalluShift run (lost when that repo was recloned fresh; reapplied here since
-this module now owns that computation for the shared pipeline).
-
-WHY REWRITTEN, NOT IMPORTED: the original scipy.stats.wasserstein_distance +
-F.cosine_similarity, called once per (generated token, layer-pair), profiled
-at 30-50s+ PER EXAMPLE and climbing with context length -- the actual
-bottleneck behind a stalled multi-day run, while model.generate() itself only
-took ~2-3s/example. The fix: every call here compares two EQUAL-LENGTH,
-EQUAL-WEIGHT softmax distributions, for which Wasserstein-1 has a closed
-form (verified bit-identical to scipy across many trials/sizes):
-    W1(p, q) == mean(|sort(p) - sort(q)|)
-Batching every layer-pair for one token into a single NumPy op (one
-.cpu().numpy() transfer per token, not per pair) took this from 46.17s to
-0.50s on a realistic 64-token/32-layer/500-token-prompt simulation (~92x),
-with max abs error ~3e-8 (float32 rounding) vs the original scipy-based
-result. See that investigation for the full profiling trail.
-
-Output shape matches HalluShift's own `result` row exactly (module docstring
-in scripts/reproducing_baselines/hallushift/hal_detection.py's process_row):
-    plot_internal_state_2(hidden) + plot_internal_state_2(attention)
-    + probability_function(logits) + [decoded_response]
-so scripts/reproducing_baselines/hallushift/functions.data_preparation and
-classifier.train_combined_model consume it completely unmodified -- this
-module only changes how the raw generation is obtained, never HalluShift's
-own method code.
-"""
+# HalluShift's per-token feature computation, ported from
+# scripts/reproducing_baselines/hallushift/functions.py (plot_internal_state_2
+# / probability_function), rewritten for performance: the original
+# scipy.stats.wasserstein_distance + F.cosine_similarity took 30-50s+ per
+# example. Every call here compares two equal-length, equal-weight softmax
+# distributions, for which Wasserstein-1 has a closed form:
+#     W1(p, q) == mean(|sort(p) - sort(q)|)
+# (verified bit-identical to scipy). Batched per-token into one NumPy op:
+# 46.17s -> 0.50s on a realistic simulation, ~3e-8 max abs error.
+#
+# Output shape matches HalluShift's own `result` row exactly, so
+# hallushift/functions.data_preparation and classifier.train_combined_model
+# consume it unmodified.
 
 from __future__ import annotations
 
@@ -35,26 +19,11 @@ import torch
 
 
 def plot_internal_state_2(step_tensors: tuple, num_layers: int, state: str = "hidden") -> list[float]:
-    """Per-token Wasserstein-1 + cosine-similarity between consecutive
-    layer-pairs, averaged over all generated tokens.
-
-    Args:
-        step_tensors: outputs.hidden_states or outputs.attentions from
-            capture_all(..., capture_generate_outputs=True) -- a tuple of
-            T per-step tuples, each of per-layer tensors (see that
-            function's docstring for the exact shape contract, which
-            matches transformers' GenerateDecoderOnlyOutput exactly).
-        num_layers: the model's layer count (model.config.num_hidden_layers).
-        state: "hidden" or "attention" -- which axis stride HalluShift's
-            original code used (hidden: every 2nd layer INCLUDING the
-            embedding output at index 0; attention: every 2nd layer
-            starting at 1, since attentions has no embedding entry).
-
-    Returns:
-        A flat list of 2*((num_layers//2)-1) floats: Wasserstein distances
-        for each consecutive layer-pair, then cosine similarities for the
-        same pairs -- identical layout to the original plot_internal_state_2.
-    """
+    # Per-token Wasserstein-1 + cosine-similarity between consecutive
+    # layer-pairs, averaged over all generated tokens. state picks which axis
+    # stride HalluShift's original code used ("hidden" includes the embedding
+    # output at index 0; "attention" has no embedding entry).
+    # Returns 2*((num_layers//2)-1) floats: distances then similarities.
     if state == "hidden":
         layer_indices = list(range(2, num_layers + 1, 2))
     else:
@@ -93,17 +62,7 @@ def plot_internal_state_2(step_tensors: tuple, num_layers: int, state: str = "hi
 
 
 def probability_function(step_logits: tuple) -> list[list[float]]:
-    """Per-token max/min softmax probability, one list per generated token.
-
-    Args:
-        step_logits: outputs.logits from capture_all(...,
-            capture_generate_outputs=True) -- a tuple of T per-step (1, vocab)
-            tensors.
-
-    Returns:
-        [max_prob_results, min_prob_results] -- identical layout to the
-        original probability_function (two lists, same length as step_logits).
-    """
+    # Per-token max/min softmax probability -> [max_prob_results, min_prob_results]
     max_prob_results = []
     min_prob_results = []
     for logit in step_logits:
@@ -114,12 +73,6 @@ def probability_function(step_logits: tuple) -> list[list[float]]:
 
 
 def build_hallushift_row(generate_outputs: dict, num_layers: int, response: str) -> list:
-    """One HalluShift `result` row for a single example -- the exact
-    concatenation scripts/reproducing_baselines/hallushift/hal_detection.py's
-    process_row builds from a real model.generate() call, but from
-    capture_all(..., capture_generate_outputs=True)'s captured per-step
-    outputs instead.
-    """
     return (
         plot_internal_state_2(generate_outputs["hidden_states"], num_layers, state="hidden")
         + plot_internal_state_2(generate_outputs["attentions"], num_layers, state="attention")

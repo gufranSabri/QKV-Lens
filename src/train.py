@@ -1,4 +1,4 @@
-"""Training loop: train and evaluate the detector on one (dataset, LLM) source."""
+# Training loop: train and evaluate the detector on one (dataset, LLM) source.
 
 from __future__ import annotations
 
@@ -34,29 +34,19 @@ logger = get_logger(__name__)
 def load_source(
     cfg: Config, dataset_name: str, llm_alias: str, field_source: str = "qkv", **kw
 ) -> QKVFieldDataset:
-    """field_source: "qkv" (default, the canonical/ablation-cell QKV tree) or
-    "hidden-states" (the representation ablation's alternative field -- see
-    src/extract/run_extraction.hidden_states_dir). The hidden-states tree is
-    never a pooling-ablation cell or a legacy QKV-Lens corpus, so it bypasses
-    dataset_dir_for/legacy.resolve_root entirely and is addressed directly.
-    """
+    # field_source: "qkv" (default, canonical/ablation-cell tree) or
+    # "hidden-states" (the representation ablation's alternative field).
+    # The hidden-states tree is never a pooling-ablation cell or legacy
+    # corpus, so it's addressed directly rather than through
+    # dataset_dir_for/legacy.resolve_root.
     data_root = Path(cfg.data_root)
 
     if field_source == "hidden-states":
-        # hidden_states_dir(cfg) itself only reads cfg.dataset.name/
-        # cfg.llm.alias, not arbitrary (dataset, llm) arguments, so the path
-        # is built directly here instead of calling it -- this mirrors
-        # hidden_states_dir's OWN convention ({data_root}/hidden_states/
-        # {dataset}/{llm_alias}/), just parameterised by the (dataset_name,
-        # llm_alias) THIS call was actually given (e.g. a cross-LLM test()
-        # resolving a different LLM's hidden-states tree than cfg's own).
         root = data_root / "hidden_states" / dataset_name / llm_alias
     else:
-        # dataset_name/llm_alias may differ from cfg's own (e.g. cross-LLM
-        # test() evaluates a checkpoint's dataset against another LLM's
-        # corpus) -- see Config.dataset_dir_for. `extract.pool` still comes
-        # from cfg: a pooling-ablation config must read its own pool_<mode>
-        # subtree regardless of which (dataset, llm) combination is loaded.
+        # dataset_name/llm_alias may differ from cfg's own (cross-LLM test()
+        # evaluates a checkpoint's dataset against another LLM's corpus).
+        # extract.pool still comes from cfg.
         native = cfg.dataset_dir_for(dataset_name, llm_alias, root=str(data_root))
         root = legacy.resolve_root(
             native, data_root, dataset_name, llm_alias,
@@ -76,8 +66,8 @@ def load_source(
 
 
 def _unpack_batch(batch, device):
-    """Returns (model_args, labels, origins) where model_args is the exact
-    positional-arg tuple QKVHalluDetector.forward expects."""
+    # Returns (model_args, labels, origins); model_args is the positional-arg
+    # tuple QKVHalluDetector.forward expects.
     images, labels, mask, origins = batch
     images = images.to(device, non_blocking=True)
     mask = mask.to(device, non_blocking=True)
@@ -85,11 +75,8 @@ def _unpack_batch(batch, device):
 
 
 def run_epoch(model, loader, criterion, device, optimizer=None, desc=""):
-    """One pass. Trains if `optimizer` is given, else evaluates.
-
-    Takes no scheduler: the LR schedule steps once per epoch, so the caller
-    drives it.
-    """
+    # One pass; trains if `optimizer` is given, else evaluates. No scheduler
+    # arg -- the LR schedule steps once per epoch, driven by the caller.
     training = optimizer is not None
     model.train(training)
 
@@ -106,14 +93,12 @@ def run_epoch(model, loader, criterion, device, optimizer=None, desc=""):
             if training:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                # Exploding gradients through a BiLSTM are a classic failure here.
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
 
             total_loss += loss.item()
             n_batches += 1
             all_y.extend(labels.detach().cpu().numpy())
-            # Metrics need probabilities; the model emits raw logits.
             all_p.extend(torch.sigmoid(logits).detach().cpu().numpy())
 
     metrics = compute_metrics(all_y, all_p)
@@ -127,7 +112,6 @@ def _section(title: str) -> None:
 
 
 def log_run_header(cfg: Config, run_dir, device, dataset_name: str) -> None:
-    """Log what this run actually IS, before anything expensive happens."""
     _section("run")
     logger.info("run dir      : %s", run_dir)
     logger.info("device       : %s", device)
@@ -163,7 +147,6 @@ def log_run_header(cfg: Config, run_dir, device, dataset_name: str) -> None:
 
 
 def log_param_counts(model) -> None:
-    """Per-component parameter breakdown -- where the capacity actually is."""
     groups = [
         ("backbone", getattr(model, "backbone", None)),
         ("temporal encoder", getattr(model, "temporal", None)),
@@ -179,12 +162,8 @@ def log_param_counts(model) -> None:
 
 
 def log_model_repr(model) -> None:
-    """The full module tree, exactly as PyTorch sees it.
-
-    Emitted line by line rather than as one blob: the log formatter prefixes
-    every record, so a single multi-line message would leave all but the first
-    line unprefixed and misaligned.
-    """
+    # Line by line: the log formatter prefixes every record, so one
+    # multi-line message would leave all but the first line misaligned.
     for line in repr(model).splitlines():
         logger.info("  %s", line)
 
@@ -209,15 +188,12 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
         full.origin, len(full), 100 * np.mean(full.labels),
     )
 
-    # Every supported dataset is a single upstream split (see datasets.py
-    # SPLIT_SOURCES) -- a stratified test slice is always carved out of it.
     logger.info(
         "%s has no separate test corpus; carving out a %.0f%% stratified test slice",
         dataset_name, 100 * cfg.train.test_fraction,
     )
 
-    # HalluShift-style 2-way split: val and heldout are the SAME indices, so
-    # early stopping and the final reported metric both read the same slice.
+    # HalluShift-style 2-way split: val and heldout are the SAME indices.
     train_idx, val_idx, heldout_idx = make_split(
         full.labels,
         val_fraction=cfg.train.val_fraction,
@@ -232,8 +208,6 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     logger.info("field size   : %s rows (L) x %s segments (M)", n_rows, n_segments)
 
     _section("normalisation (train split only)")
-    # Normalisation statistics come from the TRAIN split only -- computing them
-    # over val/test would leak those distributions into the input scaling.
     stats = compute_stats(full, train_idx)
     (run_dir / "stats.json").write_text(json.dumps(stats, indent=2))
     for proj, s in stats.items():
@@ -247,22 +221,19 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
         num_workers=cfg.train.num_workers,
         pin_memory=device.type == "cuda",
     )
-    # drop_last on TRAIN only: BatchNorm1d in TemporalEncoder's conv stack
-    # can't compute a variance over a batch of size 1, which a trailing
-    # remainder batch hits whenever len(train_idx) % batch_size == 1. Val/test
-    # must never drop data -- that would silently shrink the reported metrics.
+    # drop_last on TRAIN only: BatchNorm1d can't compute variance over a
+    # batch of size 1 (a trailing remainder batch when len % batch_size == 1).
+    # Val/test must never drop data.
     train_loader = DataLoader(
         Subset(full, train_idx), shuffle=True, drop_last=True, **loader_kw
     )
     val_loader = DataLoader(Subset(full, val_idx), shuffle=False, **loader_kw)
 
     # ---- model --------------------------------------------------------
-    # collapse_axis shrinks the L or M axis to 1 at DATA-LOADING time (see
-    # src/data/dataset.py collapse_axis_mean) -- geometry.json's n_rows/
-    # n_segments are extraction-time numbers and never reflect that, so the
-    # backbone's field_shape must be overridden here to match what the
-    # dataset actually hands it, or FlatMLP's eagerly-built first layer
-    # would have the wrong input width.
+    # collapse_axis shrinks L or M to 1 at data-loading time; geometry.json's
+    # n_rows/n_segments are extraction-time numbers and don't reflect that,
+    # so field_shape is overridden here to match what the dataset hands the
+    # model (else an eagerly-built backbone gets the wrong input width).
     if cfg.model.collapse_axis == "L":
         n_rows = 1
     elif cfg.model.collapse_axis == "M":
@@ -278,15 +249,13 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     log_param_counts(model)
 
     _section("optimisation")
-    # Class weighting: hallucination rates are typically far from 50/50, and an
-    # unweighted BCE will happily collapse to predicting the majority class.
     pos_weight = None
     if cfg.train.balance_classes:
         y = np.asarray([full.labels[i] for i in train_idx])
         n_pos, n_neg = int(y.sum()), int(len(y) - y.sum())
         if n_pos > 0 and n_neg > 0:
-            # float32 explicitly: numpy's int division yields float64, which MPS
-            # refuses outright and which would silently upcast the loss on CUDA.
+            # float32 explicitly: numpy int division yields float64, which
+            # MPS refuses and which would silently upcast the loss on CUDA.
             pos_weight = torch.tensor(
                 [n_neg / n_pos], dtype=torch.float32, device=device
             )
@@ -294,11 +263,8 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    # Discriminative LR: the CNN backbone gets lr * backbone_lr_scale,
-    # everything else (temporal, head) gets the full lr. A pretrained backbone
-    # (scale < 1) wants a gentler LR than the randomly-initialised head, or it
-    # gets its ImageNet features wrecked before the head stabilises. scale ==
-    # 1.0 collapses to a single group -- correct for scratch / random-init.
+    # Discriminative LR: backbone gets lr * backbone_lr_scale, everything
+    # else gets the full lr. scale == 1.0 collapses to a single group.
     scale = cfg.train.backbone_lr_scale
     backbone_lr = cfg.train.lr * scale
     if scale == 1.0:
@@ -318,15 +284,10 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
 
     optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.train.weight_decay)
 
-    # Linear decay (paper §5.3): hold the LR flat for the first
-    # `lr_decay_start` epochs, then ramp it linearly down to `lr_final_scale`
-    # of its initial value by the last epoch. LambdaLR multiplies each group's
-    # OWN initial LR by the same factor, so the backbone:head ratio set above
-    # holds for the entire run.
-    #
-    # Stepped once per EPOCH (not per batch), so it is deliberately not handed
-    # to run_epoch(). Note the slope is tied to `epochs`: if early stopping
-    # fires first, the LR simply never reaches the floor.
+    # Linear decay (paper §5.3): flat for lr_decay_start epochs, then ramp
+    # to lr_final_scale x initial by the last epoch. Stepped once per EPOCH,
+    # not per batch -- deliberately not passed into run_epoch(). If early
+    # stopping fires before `epochs`, the LR simply never reaches the floor.
     warm = cfg.train.lr_decay_start
     final = cfg.train.lr_final_scale
     total = cfg.train.epochs
@@ -334,7 +295,6 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     def lr_lambda(epoch: int) -> float:      # epoch is 0-based
         if epoch < warm:
             return 1.0
-        # Guard the degenerate case where decay starts on/after the final epoch.
         span = max(1, total - warm)
         frac = min(1.0, (epoch - warm) / span)
         return 1.0 + frac * (final - 1.0)
@@ -362,12 +322,10 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
                     epoch, tr["loss"], tr["auroc"], format_metrics(va),
                     " ".join(f"{lr:.2e}" for lr in lrs), time.time() - t0)
 
-        # Linear decay is a pure function of the epoch index -- no metric.
         scheduler.step()
 
         record = {"epoch": epoch, "train": tr, "val": va, "lr": lrs}
 
-        # Model selection on validation AUROC, never on test.
         if va["auroc"] > best_auroc:
             best_auroc, best_epoch, stale = va["auroc"], epoch, 0
             torch.save(
@@ -377,25 +335,10 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
                     "stats": stats,
                     "epoch": epoch,
                     "val_auroc": va["auroc"],
-                    # So test.py can tell an in-distribution eval (must be
-                    # restricted to heldout_idx) from a zero-shot one (evaluate
-                    # the whole corpus), and recover the exact held-out rows.
                     "train_datasets": [dataset_name],
                     "heldout_idx": heldout_idx,
-                    # Which LLM this checkpoint's data came from -- lets test.py
-                    # tell a same-dataset-different-LLM eval (which must NOT
-                    # reuse heldout_idx) apart from a genuine in-distribution one.
                     "llm_alias": cfg.llm.alias,
-                    # (n_rows, n_segments) the model was built for -- test.py and
-                    # cam.py have no dataset in scope at load_state_dict time, so
-                    # a shape-dependent backbone (e.g. flat_mlp) needs this to
-                    # reconstruct an identically-shaped model before loading.
                     "field_shape": field_shape,
-                    # Channel count the model was built for -- 3 for QKV, 1 for
-                    # hidden states. Same reconstruction-before-load need as
-                    # field_shape; a mismatch here fails load_state_dict loudly
-                    # (wrong in_ch -> wrong first-layer shape) rather than
-                    # silently training the wrong architecture at eval time.
                     "in_ch": in_ch,
                 },
                 run_dir / "best.pt",

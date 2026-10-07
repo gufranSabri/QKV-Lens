@@ -1,35 +1,3 @@
-"""How early in a response can the detector call a hallucination?
-
-Runs a trained detector over every PREFIX of every held-out response: at step t
-the detector sees tokens 1..t and nothing after. Sweeping t from 1 to T gives one
-probability trajectory per example, and the aggregate answers "how much of the
-response do we need before the prediction is right and stays right".
-
-WHY THIS EXISTS (QKV-Steer)
----------------------------
-Steering needs an attribution map computed DURING generation, not after it. The
-plan's closed-loop drift mode (§1.5c) refreshes the map every k tokens from the
-prefix generated so far. That is only worth doing if the detector is informative
-on a prefix at all -- if it needs the full response, closed-loop steering has
-nothing to act on early, and the intervention can only ever be late. This script
-measures that directly, before any steering code is written.
-
-PREFIXES ARE SLICED, NOT MASKED
--------------------------------
-A prefix is `images[:, :t]`, not the full tensor with a shortened mask. The two
-are NOT equivalent: TemporalEncoder zeroes padding before its Conv1d, but a
-kernel_size=3 conv at position t-1 still reads position t, so a masked "prefix"
-gives its boundary token a receptive field that includes zeroed padding, while a
-sliced prefix ends there for real. Slicing is what the detector would genuinely
-see mid-generation, so slicing is what this measures. (Verified: the two agree
-only at t == T.)
-
-Batching therefore loops OUTER over prefix length and batches examples INNER --
-every row in a batch shares one t, which is exact (verified against per-example
-calls), whereas mixing lengths in a batch would require the masking that is
-precisely what we are avoiding.
-"""
-
 from __future__ import annotations
 
 import json
@@ -43,9 +11,8 @@ from src.config import Config
 from src.data.dataset import normalize
 from src.models.classifier import build_model
 from src.utils.logger import get_logger
-from src.utils.metrics import compute_metrics
 from src.utils.progress import progress
-from src.utils.seed import pick_device, seed_everything
+from src.utils.seed import pick_device
 
 logger = get_logger(__name__)
 
@@ -61,9 +28,7 @@ THRESHOLD = 0.5
 
 @dataclass
 class Trajectory:
-    """One example's per-prefix detector output."""
-
-    idx: int                  # example index in the corpus
+    idx: int
     label: int                # 1 = hallucinated
     probs: np.ndarray         # (T,) p(hallucinated) after seeing tokens 1..t
 
@@ -73,66 +38,34 @@ class Trajectory:
 
     @property
     def correct(self) -> np.ndarray:
-        """(T,) bool -- was the thresholded call right after t tokens?"""
         pred = (self.probs >= THRESHOLD).astype(int)
         return pred == self.label
 
     def first_stable_correct(self) -> int | None:
-        """Earliest t (1-indexed) after which the call is correct and STAYS
-        correct through the end of the response.
-
-        Returns None if the final call is wrong -- there is no such t, and
-        counting a transient early hit would overstate how early detection
-        happens. This is the statistic the histogram reports.
-        """
+        # Earliest t after which the call is correct and stays correct to the
+        # end; None if the final call is wrong (no such t).
         c = self.correct
         if not c[-1]:
             return None
-        # Walk back from the end while the run of correctness is unbroken.
         t = len(c)
         while t > 1 and c[t - 2]:
             t -= 1
         return t
 
     def lockin_fraction(self) -> float:
-        """`first_stable_correct` as a fraction of the response, or NaN.
-
-        NaN (not 1.0) when the final call is wrong: "never locks in" is a
-        different outcome from "locks in only at the very end", and averaging
-        the two together would report a detector that fails on an example as
-        though it succeeded late. Every consumer filters NaN and reports the
-        never-count alongside the median.
-        """
+        # NaN (not 1.0) when the final call is wrong, so "never locks in" is
+        # distinguishable from "locks in at the very end".
         t = self.first_stable_correct()
         return float("nan") if t is None else t / self.n_tokens
 
     def fraction_of(self, values: np.ndarray) -> np.ndarray:
-        """Resample a per-token array onto FRACTIONS via nearest token.
-
-        Nearest-token (not interpolation): the underlying quantity at a given
-        prefix is a real measurement at an integer t, and averaging two adjacent
-        prefixes would invent a prediction the detector never made.
-        """
-        # ceil so fraction f maps to at least 1 token and f=1.0 maps to T.
+        # Nearest-token, not interpolated: each prefix is a real measurement.
         idx = np.ceil(FRACTIONS * self.n_tokens).astype(int)
         idx = np.clip(idx, 1, self.n_tokens) - 1
         return values[idx]
 
 
-# ---------------------------------------------------------------------------
-# Cache
-#
-# The sweep is T detector passes per example and needs the extracted field plus
-# a GPU; redrawing a figure needs neither. Every trajectory is therefore stored
-# verbatim -- ragged, since responses differ in length -- so the figures and the
-# pooled summary rebuild from cache in seconds. Storing only the 13-point
-# FRACTIONS resample would have been smaller, but lock-in is a per-token
-# statistic: it cannot be recovered from a resampled curve.
-# ---------------------------------------------------------------------------
-
-
 def save_trajectories(trajs: list[Trajectory], dest: Path, provenance: dict) -> Path:
-    """Write trajectories to `dest` (.npz), ragged, with their provenance."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     lengths = np.array([t.n_tokens for t in trajs], dtype=np.int64)
     np.savez_compressed(
@@ -149,7 +82,6 @@ def save_trajectories(trajs: list[Trajectory], dest: Path, provenance: dict) -> 
 
 
 def load_trajectories(src: Path) -> tuple[list[Trajectory], dict]:
-    """Inverse of `save_trajectories`."""
     with np.load(src, allow_pickle=False) as z:
         offsets, probs = z["offsets"], z["probs_concat"]
         trajs = [
@@ -168,12 +100,8 @@ def load_trajectories(src: Path) -> tuple[list[Trajectory], dict]:
 def _prefix_probs(
     model, fields: list[torch.Tensor], device, batch_size: int
 ) -> list[np.ndarray]:
-    """p(hallucinated) at every prefix length, for a group of equal-length examples.
-
-    `fields` are (T, 3, L, M) tensors that all share the same T. Returns one
-    (T,) array per input. Loops outer over t so every batched call uses a single
-    prefix length -- see the module docstring for why mixing lengths is unsafe.
-    """
+    # Loops outer over prefix length t, sliced (not masked) -- a masked prefix
+    # would let the Conv1d's receptive field leak into zeroed padding.
     n = len(fields)
     if n == 0:
         return []
@@ -200,7 +128,6 @@ def compute_trajectories(
     limit: int | None,
     batch_size: int,
 ) -> list[Trajectory]:
-    """Run the detector over every prefix of every evaluated example."""
     from src.train import load_source
 
     device = pick_device()

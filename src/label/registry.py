@@ -1,4 +1,4 @@
-"""Dispatch to a labeling scheme, so relabeling never requires re-extraction."""
+# Dispatch to a labeling scheme, so relabeling never requires re-extraction.
 
 from __future__ import annotations
 
@@ -12,10 +12,7 @@ def label_examples(
     answers: list[str],
     golds: list,
 ) -> list[tuple[float, int]]:
-    """Score a batch of generated answers. Returns [(score, label), ...].
-
-    label == 1 means HALLUCINATED.
-    """
+    # Returns [(score, label), ...]; label == 1 means HALLUCINATED.
     scheme = cfg.labeling.scheme
 
     if scheme == "exact_match":

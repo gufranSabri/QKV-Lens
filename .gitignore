@@ -17,7 +17,7 @@
 # assembled paper-writing folder (scripts/build_main_res.py) -- fully
 # regeneratable from /runs/ and /figs/, see docs/experiments_catalog.md
 /main-res/
-# all-experiments.sh progress logs
+# all_experiments.sh progress logs
 /logs/
 
 /docs/*
@@ -50,3 +50,5 @@ scripts/experiments/
 scripts/figures/
 scripts/tables/
 slurm/
+
+CLAUDE.md

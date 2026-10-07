@@ -1,6 +1,5 @@
 #!/bin/bash
-# Batch job for the DETECTOR stage (extract + train + test). This fits f_theta,
-# which the steering stage then consumes; it does not steer anything itself.
+# Batch job for the detector stage (extract + train + test).
 #SBATCH --job-name=mains
 #SBATCH --output=slurm/%x.%j.out
 #SBATCH --error=slurm/%x.%j.err
@@ -32,4 +31,4 @@ bash scripts/install.sh --bleurt --baselines || exit 1
 # bash all-datasets_extract.sh
 # bash all-datasets_run.sh
 
-bash scripts/experiments/run_ablations.sh
+bash scripts/experiments/all_experiments.sh

@@ -3,36 +3,17 @@
 
     python scripts/analysis/run_all.py                  # every run under runs/
     python scripts/analysis/run_all.py llama2_7b_coqa   # just this one
-    python scripts/analysis/run_all.py llama2_7b_triviaqa llama3.1_8b_triviaqa \
-        opt_6.7b_triviaqa qwen2.5_7b_triviaqa            # an explicit subset
     python scripts/analysis/run_all.py --limit 0        # the full held-out split
     python scripts/analysis/run_all.py --from-cache     # redraw, no GPU needed
 
-This is the entry point that produces the paper figure. It sweeps every
-requested (LLM, dataset) cell (default: every run under runs/), writes each
-cell's own figure and report, and then pools them into:
+Sweeps every requested (LLM, dataset) cell (default: every run under runs/),
+writes each cell's own figure and report, then pools them into
+docs/figures/forecasting/forecasting_summary.png (+.pdf), the summary and
+curves CSVs under docs/tables/forecasting/, and docs/reports/forecasting/report.md.
 
-    docs/figures/forecasting/forecasting_summary.png (+ .pdf)
-    docs/tables/forecasting/forecasting_summary.csv
-    docs/tables/forecasting/forecasting_curves.csv
-    docs/reports/forecasting/report.md
-
-When every swept cell shares one dataset (e.g. the 4 canonical TriviaQA runs
-above), ALSO writes docs/figures/forecasting/forecasting_by_model.png (+.pdf)
--- one AUROC-vs-prefix line per model, since with only as many cells as
-models, which model a line belongs to IS the comparison (see
-forecasting_report.fig_summary_by_model's docstring for why this differs
-from the pooled-band design of the main summary figure).
-
-For each run directory the (dataset, LLM) config is reconstructed from that
-run's own saved `config.json` -- not by parsing the run-name string -- so it is
-exact even for a run whose name doesn't match `configs/{dataset}/{llm}.yaml`
-verbatim (e.g. a `-old` suffixed rerun).
-
-A run with no `best.pt` is skipped (training never finished). A cell that fails
-is skipped with a warning and the summary is still built from the rest, so one
-bad checkpoint does not cost the whole grid -- the report states how many cells
-it covers.
+Each run's (dataset, LLM) config is reconstructed from that run's own
+config.json, not the run-name string. A run with no best.pt is skipped; a
+cell that fails is skipped with a warning and the summary is built from the rest.
 """
 
 from __future__ import annotations
@@ -57,12 +38,8 @@ logger = get_logger(__name__)
 
 
 def config_path_for(run_dir: Path) -> tuple[Path, str]:
-    """The configs/{dataset}/{llm_alias}.yaml that produced this run, and its dataset.
-
-    Read from the run's own config.json rather than the run directory's
-    name, so it is correct even when the name doesn't follow the
-    `{llm_alias}_{dataset}` convention.
-    """
+    # Read from config.json rather than the run dir's name, so it is correct
+    # even for a name that doesn't follow the {llm_alias}_{dataset} convention.
     config_json = run_dir / "config.json"
     if not config_json.exists():
         raise FileNotFoundError(f"no config.json in {run_dir}")
@@ -169,7 +146,6 @@ def main(argv=None) -> int:
 
 
 def _cells_from_cache(docs: ForecastPaths) -> list:
-    """Every cached sweep, rebuilt into Cells without touching a checkpoint."""
     from scripts.analysis.forecasting import load_trajectories
     from scripts.analysis.forecasting_report import Cell
 

@@ -1,21 +1,12 @@
 #!/bin/bash
-# Prefix-forecasting sweep over every trained detector, then the paper figure.
-#
-# Needs `runs/<llm>_<dataset>/best.pt` for every cell -- this job only runs the
-# detector over prefixes, it never trains. Run detector.slurm first.
+# Prefix-forecasting sweep over every trained detector, then the paper
+# figure. Needs runs/<llm>_<dataset>/best.pt for every cell -- never trains.
+# Cost scales with --limit x median response length; --limit 0 (full
+# held-out split) is ~5x the 500-example default and needs --time raised.
+# Raw trajectories cache under docs/forecasting_cache/, so redrawing figures
+# afterwards (`run_all.py --summary-only`) needs no GPU.
 #
 #   sbatch forecasting.slurm
-#
-# The sweep is T detector passes per example, so cost scales with --limit x the
-# median response length. 500 examples/cell across 12 cells is comfortable in
-# the walltime below; --limit 0 (the whole held-out split, ~2.5k/cell) is
-# roughly 5x that and needs --time raised to match.
-#
-# Every cell's raw trajectories are cached under docs/forecasting_cache/, so
-# re-drawing the figures afterwards needs no GPU at all:
-#
-#   python scripts/analysis/run_all.py --summary-only
-#
 #SBATCH --job-name=forecast
 #SBATCH --output=slurm/%x.%j.out
 #SBATCH --error=slurm/%x.%j.err
@@ -42,9 +33,6 @@ export HF_HOME=/home/ahmedubc/scratch/hf_cache
 
 bash scripts/install.sh || exit 1
 
-# Sweeps every run under runs/, writes each cell's figure + report, then pools
-# them into docs/figures/forecasting/forecasting_summary.png and
-# docs/reports/forecasting/report.md.
 python scripts/analysis/run_all.py --limit 500
 
 echo "figures  -> docs/figures/forecasting/"

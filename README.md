@@ -35,7 +35,7 @@ detector.py          detector-stage CLI (extract / train / test / cam / ...)
 detector.slurm       batch job for that pipeline
 src/extract/         generation, Q/K/V capture, feature-field construction
 src/models/          the detector: backbone -> Conv1d -> BiLSTM -> head
-src/models/backbones/  flat_mlp (main) | scratch_cnn
+src/models/backbones/  layer_cnn (main) | flat_mlp | grid_cnn
 src/data/            field dataset, normalisation, QKV-Lens corpus reader
 src/cam.py           Integrated Gradients attribution over the field
 configs/             one config per (dataset, LLM)
@@ -60,11 +60,12 @@ different widths (`D_q` vs `D_kv`); each is mean-pooled to the same `M`
 independently, so all three land on one channel axis.
 
 The detector's backbone turns each token's `(L, M, 3)` field into one
-embedding (`model.backbone`, default `flat_mlp`: flatten + dropout + one
-Linear, no spatial structure preserved -- see
-`src/models/backbones/flat_mlp.py`'s docstring for why. `scratch_cnn`, a 2D
-CNN over `(L, M)`, is the "with spatial structure" ablation arm). Either way,
-the per-token embeddings then go through Conv1d + BiLSTM + masked attention
+embedding (`model.backbone`, default `layer_cnn`: a small Conv2d stage that
+mixes across the LAYER axis only, M untouched, before a flatten + dropout +
+one Linear tail. `flat_mlp` (no spatial structure) and `grid_cnn` (mixes L
+and M jointly) are the structure-preservation ablation's two comparison
+arms). Either way, the
+per-token embeddings then go through Conv1d + BiLSTM + masked attention
 pooling over the token axis, then a binary head -- see `src/models/`.
 
 ## What is fixed vs. configurable
@@ -186,7 +187,12 @@ bash scripts/install.sh --bleurt --baselines
 ```
 
 `--bleurt` pulls the TensorFlow BLEURT scorer (labeling); `--baselines` adds
-`rouge_score` / `nltk` / `sentencepiece` for the baselines above.
+`rouge_score` / `spacy` / `sentencepiece` and the rest the baselines above need.
 
 `scripts/troubleshooting.sh` is the annotated step-by-step version of the whole
 pipeline; `detector.slurm` runs it as a batch job.
+
+`scripts/experiments/all_experiments.sh` runs every ablation/analysis sweep
+this repo supports, plus the main results and a presentable digest
+(`docs/reports/ablation_summary.md`) — the fastest way to reproduce
+everything but the baselines table above.

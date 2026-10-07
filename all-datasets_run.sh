@@ -1,11 +1,8 @@
 #!/bin/bash
 # Train + test the detector on every (dataset x LLM) with default settings.
 # Run all-datasets_extract.sh first so the feature fields are on disk.
-
-# RERUN=0 (default): skip a train/test call if its output already exists --
-# train is skipped when runs/$RUN_NAME/results.json exists (only written after
-# a run finishes, so a crashed/partial run is correctly NOT treated as done);
-# test is skipped when its checkpoint's test_$DATASET.json already exists.
+#
+# RERUN=0 (default): skip train/test if its output already exists.
 # RERUN=1: always run everything, overwriting prior results.
 RERUN=${RERUN:-0}
 
@@ -22,7 +19,6 @@ MODELS=(
     opt_6.7b
 )
 
-# run_train <run_name> [--set key=val ...]
 run_train() {
     local run_name="$1"; shift
     if [[ "$RERUN" != "1" && -f "runs/${run_name}/results.json" ]]; then
@@ -32,7 +28,6 @@ run_train() {
     python detector.py --config configs/$DATASET/$MODEL.yaml train --run-name "${run_name}" "$@"
 }
 
-# run_test <run_name> [--set key=val ...]
 run_test() {
     local run_name="$1"; shift
     local dest="runs/${run_name}/test_${DATASET}.json"
@@ -59,4 +54,6 @@ for DATASET in "${DATASETS[@]}"; do
     done
 done
 
-python detector.py --config configs/triviaqa/llama3.1_8b.yaml train --run-name "test" --set model.backbone=conv_segment
+
+
+ python detector.py --config configs/triviaqa/llama3.1-8b.yaml train --run-name test --model.backbone=flat_mlp

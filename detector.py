@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Detector CLI: build QKV feature fields and train the hallucination detector.
 
-This is the LOCALIZE half of QKV-Steer, inherited from QKV-Lens. It is a
-SUPPORTING tool, not the project's headline: the detector exists to supply
-f_theta and its Integrated Gradients attribution to the steering stage, which
-is where the actual contribution lives. Nothing here intervenes on the LLM --
-every subcommand below only reads activations and fits a classifier over them.
-
-Steering entry points are separate and will not live in this file.
+The detector-stage CLI only (extract/train/test/cam/...). Steering entry
+points are separate and will not live in this file.
 
 Subcommands:
     extract   generate responses, capture Q/K/V, build and save feature fields
@@ -28,7 +23,6 @@ from src.utils.logger import setup_logging
 
 
 def _hf_login() -> None:
-    """Log in to the Hugging Face Hub using HF_TOKEN, if set."""
     import os
 
     token = os.environ.get("HF_TOKEN")
@@ -41,15 +35,14 @@ def _hf_login() -> None:
 
 
 def _overrides(args) -> dict:
-    """Turn --set a.b=c flags into a nested override dict."""
+    # Turns --set a.b=c flags into a nested override dict.
     out: dict = {}
     for item in args.set or []:
         if "=" not in item:
             raise SystemExit(f"--set expects key=value, got {item!r}")
         key, value = item.split("=", 1)
 
-        # Parse the value with YAML so ints/floats/bools/lists come through typed.
-        import yaml
+        import yaml   # parses the value so ints/floats/bools/lists come through typed
 
         parsed = yaml.safe_load(value)
 
@@ -62,12 +55,9 @@ def _overrides(args) -> dict:
 
 
 def main(argv=None) -> int:
-    # --config and --set are declared on a shared parent parser AND inherited by
-    # every subcommand, so they work on either side of the subcommand name:
+    # --config/--set declared on a shared parent parser so both orderings work:
     #     detector.py --config c.yaml train --set train.epochs=30
     #     detector.py train --config c.yaml --set train.epochs=30
-    # argparse otherwise binds a top-level flag only before the subcommand, which
-    # is a trap: the natural `train --set ...` ordering would just error out.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", help="path to a YAML config")
     common.add_argument(
@@ -148,18 +138,14 @@ def main(argv=None) -> int:
     )
     p_cam.add_argument("--out", default=None)
 
-    # Two-stage parse. When a flag is declared on BOTH the top-level parser and a
-    # subparser (via `parents`), argparse runs the subparser LAST, so its default
-    # silently overwrites whatever the top-level flag captured -- i.e.
-    # `--config c.yaml train` would end up with config=None. Parsing the
-    # pre-subcommand args separately and then filling in any gaps avoids that,
-    # and lets both orderings work.
+    # Two-stage parse: the subparser's default would otherwise silently
+    # overwrite a flag captured before the subcommand (argparse runs the
+    # subparser last), e.g. `--config c.yaml train` ending with config=None.
     pre, _ = common.parse_known_args(argv)
     args = parser.parse_args(argv)
 
     if not args.config:
         args.config = pre.config
-    # Merge, don't replace: --set may legitimately appear on both sides.
     args.set = list(pre.set or []) + [s for s in (args.set or []) if s not in (pre.set or [])]
 
     if not args.config:

@@ -1,4 +1,4 @@
-"""Evaluate a saved detector checkpoint on a dataset."""
+# Evaluate a saved detector checkpoint on a dataset.
 
 from __future__ import annotations
 
@@ -36,10 +36,8 @@ def test(
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     stats = ckpt["stats"]
 
-    # Cross-LLM eval: cfg.llm.alias is whatever --config points at, which may
-    # differ from the LLM this checkpoint was actually trained on. Surface this
-    # loudly and unconditionally -- it silently changes what "in-distribution"
-    # even means below (see _resolve_eval_target).
+    # Cross-LLM eval: cfg.llm.alias may differ from the LLM this checkpoint
+    # was trained on -- silently changes what "in-distribution" means below.
     ckpt_llm_alias = ckpt.get("llm_alias")
     if ckpt_llm_alias is not None and ckpt_llm_alias != cfg.llm.alias:
         logger.warning(
@@ -51,11 +49,9 @@ def test(
                  f"to llm={cfg.llm.alias!r}'s activations",
         )
 
-    # layer_permute_seed changes what INPUT the model was trained to read --
-    # unlike a wrong backbone choice, which fails to load_state_dict, a
-    # mismatched (or missing) permutation here loads fine and just silently
-    # evaluates the model on a different layer ordering than it was trained
-    # on, undermining the whole point of this ablation.
+    # layer_permute_seed changes what INPUT the model was trained on; unlike
+    # a wrong backbone (fails to load_state_dict), a mismatch here loads fine
+    # and silently evaluates against a different layer ordering.
     ckpt_seed = (ckpt.get("config") or {}).get("model", {}).get("layer_permute_seed")
     if ckpt_seed != cfg.model.layer_permute_seed:
         logger.warning(
@@ -65,12 +61,8 @@ def test(
             ckpt_seed, cfg.model.layer_permute_seed, ckpt_seed,
         )
 
-    # extract.source picks which TREE gets loaded (QKV vs hidden-states) --
-    # unlike layer_permute_seed, a mismatch here is not silent: the checkpoint
-    # was built with the right in_ch for what it trained on (see "in_ch"
-    # above), so feeding it the OTHER tree fails loudly in encode_tokens's own
-    # channel check. Still worth a clear warning before that exception, rather
-    # than discovering it mid-batch.
+    # extract.source mismatch is not silent -- it fails loudly in
+    # encode_tokens's channel check -- but warn before that exception.
     ckpt_source = (ckpt.get("config") or {}).get("extract", {}).get("source", "qkv")
     if ckpt_source != cfg.extract.source:
         logger.warning(
@@ -81,10 +73,6 @@ def test(
             ckpt_source, cfg.extract.source, ckpt_source,
         )
 
-    # collapse_axis changes field_shape/in_ch the same way extract.source
-    # does -- a mismatch fails loudly (load_state_dict or encode_tokens),
-    # never silently, but a clear warning up front beats discovering it via
-    # a shape-mismatch stack trace.
     ckpt_collapse = (ckpt.get("config") or {}).get("model", {}).get("collapse_axis")
     if ckpt_collapse != cfg.model.collapse_axis:
         logger.warning(
@@ -99,20 +87,15 @@ def test(
 
     source = load_source(cfg, name, cfg.llm.alias, field_source=cfg.extract.source)
     if recompute_stats:
-        # Explicit opt-in: normalise with statistics computed fresh from the
-        # TARGET corpus, instead of the checkpoint's training-LLM statistics.
-        # Meaningful only for a genuine cross-LLM eval.
         logger.info(
             "recomputing normalization stats from %s (recompute_stats=True)",
             source.origin,
         )
         stats = compute_stats(source, list(range(len(source))))
-    # Normalise with the TRAINING statistics baked into the checkpoint by
-    # default, never with statistics silently recomputed on the test set.
     source.stats = stats
 
-    # Restrict to the held-out rows when the model was trained on this corpus.
-    # Skipping this is what would make every same-dataset score a train score.
+    # Restrict to the held-out rows when the model was trained on this
+    # corpus -- skipping this would make every same-dataset score a train score.
     eval_data = source
     if eval_set is not None:
         if not eval_set:
@@ -156,22 +139,13 @@ def test(
 def _resolve_eval_target(
     name: str, ckpt: dict, llm_alias: str
 ) -> tuple[str, list[int] | None]:
-    """Pick what to actually evaluate on. Returns (corpus_name, row_subset).
-
-    The rule, in order:
-
-    1. We trained on it, on THIS SAME LLM -> evaluate the stratified slice held
-       out at train time. (Every dataset mirrors HalluShift, which never
-       trains/tests on separate corpora.)
-    2. Anything else (a different dataset, OR the same dataset name but a
-       DIFFERENT LLM) -> zero-shot; evaluate the full corpus. `heldout_idx` was
-       computed against the CHECKPOINT's LLM's manifest -- reusing it against a
-       different LLM's manifest would restrict the eval to index positions with
-       no real meaning for that LLM's data, so a dataset-name match alone is
-       not enough; the LLM must match too.
-
-    A `row_subset` of None means "use the whole corpus".
-    """
+    # Picks what to evaluate on; returns (corpus_name, row_subset), None
+    # meaning "use the whole corpus".
+    #   1. Trained on it, same LLM -> evaluate the held-out slice from train time.
+    #   2. Anything else (different dataset, or same dataset but different
+    #      LLM) -> zero-shot, full corpus. heldout_idx was computed against
+    #      the checkpoint's LLM's manifest, so it has no meaning for a
+    #      different LLM's data even when the dataset name matches.
     trained_on = set(ckpt.get("train_datasets", []))
     ckpt_llm_alias = ckpt.get("llm_alias")
     same_llm = ckpt_llm_alias is None or ckpt_llm_alias == llm_alias

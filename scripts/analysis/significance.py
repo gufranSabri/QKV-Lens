@@ -1,37 +1,3 @@
-"""Class-separability statistics for QKV feature fields, across every model x
-dataset.
-
-Tests the claim behind the "What does hallucination look like?" question: the
-hallucinated and non-hallucinated class-average feature fields differ
-*systematically* (a permutation test rejects label exchangeability) even
-though the per-location effect sizes are small (Cohen's d), i.e. the signal is
-weak locally but distributed across the field.
-
-For each (dataset, LLM) pair this computes, on the (token x layer) field
-mean-pooled over the segment axis M:
-
-  * a permutation test on the mean absolute class difference, giving a z-score
-    against the label-shuffled null;
-  * per-cell Cohen's d, summarised as mean |d| and the fraction of cells
-    exceeding |d| > 0.5.
-
-Reads through `QKVFieldDataset` (src/data/dataset.py) rather than loading
-tokens.npy directly, so both native (T, L, M, 3) corpora and QKV-Lens-era
-legacy corpora (src/data/legacy.py) are handled identically.
-
-All responses are used. Responses have variable length, so each (token, layer)
-cell is averaged over only the responses that have that token (padding is
-masked, never averaged), and only token positions with >= MIN_PER_CLASS
-responses in both classes are analysed. The permutation null shuffles labels
-across all responses, so class imbalance is built into the null.
-
-Outputs `docs/tables/significance_stats.csv` and the figure
-`docs/figures/significance.png`.
-
-Usage:
-    python scripts/analysis/significance.py [--n-perm 500]
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -63,29 +29,18 @@ PRETTY = {
 
 
 def load_field_source(ds: str, model: str):
-    """QKVFieldDataset for (ds, model), via the normal Config path -- no
-    training, no normalisation (stats=None, so _finish only permutes channels
-    into conv position). `source.records[i]` gives label/n_tokens straight
-    from the manifest, with no tensor.npy read."""
     cfg = load_config(str(REPO_ROOT / "configs" / ds / f"{model}.yaml"))
     return load_source(cfg, ds, cfg.llm.alias)
 
 
-T_MAX = 64          # tokens kept per response (matches extraction cap)
-MIN_PER_CLASS = 30  # a token position is analysed only if BOTH classes have this many responses
+T_MAX = 64
+MIN_PER_CLASS = 30
 
 
 def collect(ds: str, model: str):
-    """Every response of (ds, model), as a zero-padded field plus a validity mask.
-
-    Responses are short and vary in length (median 2-5 tokens), so cropping to a
-    common window discards most of the corpus. Instead nothing is dropped:
-    X is (N, 3, T_MAX, L) with a (N, T_MAX) mask marking real tokens, and
-    statistics average each (token, layer) cell over only the responses that
-    actually have that token. Padded slots are never averaged in. Only token
-    positions where BOTH classes have >= MIN_PER_CLASS responses are analysed.
-    """
-    source = load_field_source(ds, model)   # stats=None -> raw field
+    # Responses vary in length, so nothing is cropped: X is zero-padded to
+    # T_MAX with mask M marking real tokens, and stats only average real cells.
+    source = load_field_source(ds, model)
     n = len(source.records)
     labels = np.array([int(r["label"]) for r in source.records], dtype=bool)
     X = M = None
@@ -110,11 +65,7 @@ def collect(ds: str, model: str):
 
 
 def stats_for(X: np.ndarray, M: np.ndarray, labels: np.ndarray, n_perm: int, rng) -> dict:
-    """Permutation z-score plus Cohen's d summaries over masked cells.
-
-    X (N, 3, T, L) zero-padded, M (N, T) validity, labels (N,) bool.
-    Label permutation keeps group sizes, so class imbalance is part of the null.
-    """
+    # Label permutation keeps group sizes, so class imbalance is part of the null.
     N, _, T, L = X.shape
     Xf = X.reshape(N, -1)
     Xsq = Xf ** 2
@@ -160,9 +111,6 @@ def stats_for(X: np.ndarray, M: np.ndarray, labels: np.ndarray, n_perm: int, rng
 
 
 def build_figure(rows: list[dict]) -> None:
-    """Three panels, each readable without the surrounding prose."""
-    from scripts.figures import style_modern as fm
-
     x = np.arange(len(rows))
     ds_colour = {"coqa": "#4C72B0", "triviaqa": "#DD8452", "truthfulqa": "#55A868"}
     ds_pretty = {"coqa": "CoQA", "triviaqa": "TriviaQA", "truthfulqa": "TruthfulQA"}

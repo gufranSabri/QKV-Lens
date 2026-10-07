@@ -1,44 +1,6 @@
-"""Figures, tables and reports for the prefix-forecasting analysis.
-
-Two questions drive every artifact here, and nothing else is drawn:
-
-  1. HOW EARLY IS THE VERDICT USABLE?  AUROC as a function of how much of the
-     response the detector has seen, and the prefix at which that curve reaches
-     95% of its own full-response value.
-  2. WHEN DOES THE VERDICT STOP CHANGING?  Per example, the earliest prefix
-     after which the call is correct and never flips again
-     (`Trajectory.first_stable_correct`) -- the point from which the detector is
-     right from there on out.
-
-Everything is produced at two scales: one compact panel per (LLM, dataset)
-cell, and one dense summary across the whole grid. The summary is the figure
-meant for the paper; the per-cell panels are the supplement that backs it.
-
-WHY ONE SUMMARY FIGURE AND NOT A WALL OF THEM
----------------------------------------------
-The grid is 4 LLMs x 3 datasets. Drawn as separate per-cell figures that is 12
-pages that no reader will cross-reference. The summary is instead two pooled
-curves, the first carrying the across-cell spread as quantile bands, so the
-variation is visible without a panel per cell. The per-cell NUMBERS are not in
-the figure at all -- they are in the report's markdown tables and in
-forecasting_summary.csv, which is where a reader checks a specific cell anyway.
-
-The summary figure carries no title and no in-plot annotations: it is meant to
-be dropped into a paper, where the caption is LaTeX's job.
-
-COLOUR
-------
-Palettes come from `scripts/figures/style.py`, which documents why only TWO
-categorical hues are CVD-safe in this band. So hue encodes the one contrast
-that matters -- hallucinated vs clean -- and never the dataset or the LLM.
-The per-cell spread is carried by quantile bands in a single hue instead, and
-the per-cell numbers by the report's tables.
-"""
-
 from __future__ import annotations
 
 import csv
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,17 +14,13 @@ from src.utils.metrics import compute_metrics
 
 logger = get_logger(__name__)
 
-#: Hue is reserved for the one contrast that matters. `style.py` explains why a
-#: third categorical hue is not available CVD-safely in this lightness band.
+# Hue is reserved for the one contrast that matters (style.py: only 2 CVD-safe hues here).
 HALLU = st.SECOND      # truly hallucinated
 CLEAN = st.PRIMARY     # truly clean
 
-#: Fraction of the full-response AUROC (measured above chance, so the bar is not
-#: trivially met by a detector that is barely better than a coin) that counts as
-#: "the verdict is now usable". Reported as `earliness`.
+# Fraction of full-response AUROC, measured above chance, that counts as "usable".
 USABLE = 0.95
 
-#: Headline prefix for the "a quarter of the way in" statistic in the report.
 HEADLINE_FRACTION = 0.25
 
 PRETTY_LLM = {
@@ -76,34 +34,19 @@ PRETTY_DATASET = {
     "truthfulqa": "TruthfulQA",
     "coqa": "CoQA",
 }
-#: Display order when the cells are laid out as a grid. Cells outside these
-#: lists still render -- they are appended in sorted order (see `_axis_order`).
+# Display order for the grid layout; cells outside these lists still render, sorted after.
 LLM_ORDER = ("llama2_7b", "llama3.1_8b", "opt_6.7b", "qwen2.5_7b")
 DATASET_ORDER = ("truthfulqa", "triviaqa", "coqa")
 
-#: Grid the lock-in CDF is evaluated on. Finer than FRACTIONS because lock-in is
-#: a per-token statistic and its CDF is a step function -- a coarse grid would
-#: hide the steps that carry the shape.
 CDF_GRID = np.linspace(0.0, 1.0, 201)
 
 
 def pct(x: float, digits: int = 0) -> str:
-    """Percent, or an em dash for an undefined value."""
     return "—" if x is None or not np.isfinite(x) else f"{x:.{digits}%}"
-
-
-# ---------------------------------------------------------------------------
-# Per-cell aggregation
-# ---------------------------------------------------------------------------
 
 
 @dataclass
 class Cell:
-    """Everything the figures need about one (LLM, dataset) pair.
-
-    Built once from the trajectories and then treated as read-only, so the
-    summary figure and the per-cell figure cannot disagree about a number.
-    """
 
     llm: str
     dataset: str
@@ -134,7 +77,6 @@ class Cell:
             accuracy=np.array(accs),
         )
 
-    # -- identity ----------------------------------------------------------
     @property
     def key(self) -> str:
         return f"{self.llm}_{self.dataset}"
@@ -148,71 +90,50 @@ class Cell:
     def n(self) -> int:
         return len(self.labels)
 
-    # -- question 1: how early is the verdict usable? ----------------------
     @property
     def final_auroc(self) -> float:
         return float(self.auroc[-1])
 
     @property
     def earliness(self) -> float:
-        """Smallest prefix fraction whose AUROC reaches `USABLE` of the final.
-
-        Measured above chance: the target is 0.5 + USABLE * (final - 0.5), so a
-        detector that finishes at 0.55 does not clear the bar just by starting
-        near 0.5. Returns a value ON the FRACTIONS grid rather than an
-        interpolated one -- each grid point is a real measurement, and
-        interpolating would report a prefix the detector was never run at
-        (the same reason `Trajectory.fraction_of` resamples by nearest token).
-        NaN if the curve never gets there.
-        """
+        # Target measured above chance; value snapped to the FRACTIONS grid
+        # since each point is a real measurement, not interpolated. NaN if
+        # the curve never reaches it.
         target = 0.5 + USABLE * (self.final_auroc - 0.5)
         hit = np.where(self.auroc >= target)[0]
         return float(FRACTIONS[hit[0]]) if len(hit) else float("nan")
 
     def auroc_at(self, fraction: float) -> float:
-        """AUROC at the FRACTIONS grid point nearest `fraction`."""
         return float(self.auroc[int(np.argmin(np.abs(FRACTIONS - fraction)))])
 
     @property
     def retained_at_headline(self) -> float:
-        """Share of the full-response AUROC lift already present at 25%."""
         lift = self.final_auroc - 0.5
         if lift <= 0:
             return float("nan")
         return (self.auroc_at(HEADLINE_FRACTION) - 0.5) / lift
 
-    # -- question 2: when does the verdict stop changing? ------------------
     def lockin_of(self, label: int | None = None) -> np.ndarray:
-        """Lock-in fractions for one class (or all), NaNs included."""
         return self.lockin if label is None else self.lockin[self.labels == label]
 
     def median_lockin(self, label: int | None = None) -> float:
-        """Median lock-in among examples that DO lock in. NaN if none do."""
         vals = self.lockin_of(label)
         vals = vals[np.isfinite(vals)]
         return float(np.median(vals)) if len(vals) else float("nan")
 
     def never_rate(self, label: int | None = None) -> float:
-        """Share of examples whose final verdict is wrong, so they never lock in."""
         vals = self.lockin_of(label)
         return float(np.mean(~np.isfinite(vals))) if len(vals) else float("nan")
 
     def lockin_cdf(self, label: int | None = None) -> np.ndarray:
-        """P(locked in by prefix f) on CDF_GRID.
-
-        The denominator is EVERY example of the class, including those that
-        never lock in, so the curve plateaus at 1 - never_rate rather than being
-        renormalised to 1. A curve forced to 1 would show a detector that is
-        wrong on 20% of examples as though it eventually got them all.
-        """
+        # Denominator is every example of the class, so the curve plateaus at
+        # 1 - never_rate rather than being renormalised to 1.
         vals = self.lockin_of(label)
         if not len(vals):
             return np.full_like(CDF_GRID, np.nan)
-        # NaN <= f is False, so non-locking examples correctly never count.
         return np.array([np.mean(vals <= f) for f in CDF_GRID])
 
     def mean_prob_band(self, label: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Median and IQR of p(hallucinated) at each prefix, for one class."""
         sel = self.probs_at[self.labels == label]
         if not len(sel):
             nan = np.full(len(FRACTIONS), np.nan)
@@ -222,20 +143,12 @@ class Cell:
                 np.percentile(sel, 75, axis=0))
 
 
-# ---------------------------------------------------------------------------
-# Pooled views over the grid
-# ---------------------------------------------------------------------------
-
-
 def _axis_order(values: set[str], preferred: tuple[str, ...]) -> list[str]:
-    """`preferred` first (those that are present), then any extras, sorted."""
     known = [v for v in preferred if v in values]
     return known + sorted(values - set(known))
 
 
 class Grid:
-    """The set of cells, with the pooled statistics the summary figure draws."""
-
     def __init__(self, cells: list[Cell]):
         if not cells:
             raise ValueError("no cells to summarise")
@@ -249,12 +162,8 @@ class Grid:
 
     @property
     def mean_auroc(self) -> np.ndarray:
-        """AUROC at each prefix, averaged over CELLS (not over examples).
-
-        Cell-weighted, so a dataset with more held-out rows does not dominate
-        the headline curve -- the claim being made is about the method across
-        settings, not about one corpus.
-        """
+        # Cell-weighted (not example-weighted), so a dataset with more
+        # held-out rows does not dominate the headline curve.
         return np.nanmean(np.stack([c.auroc for c in self.cells]), axis=0)
 
     @property
@@ -263,14 +172,12 @@ class Grid:
 
     @property
     def pooled_earliness(self) -> float:
-        """Where the CELL-MEAN AUROC curve reaches USABLE of its final value."""
         final = float(self.mean_auroc[-1])
         target = 0.5 + USABLE * (final - 0.5)
         hit = np.where(self.mean_auroc >= target)[0]
         return float(FRACTIONS[hit[0]]) if len(hit) else float("nan")
 
     def pooled_lockin_cdf(self, label: int | None = None) -> np.ndarray:
-        """Cell-mean of the per-cell lock-in CDFs, for the same reason as above."""
         return np.nanmean(
             np.stack([c.lockin_cdf(label) for c in self.cells]), axis=0
         )
@@ -279,19 +186,7 @@ class Grid:
         return float(np.nanmedian([c.median_lockin(label) for c in self.cells]))
 
 
-
-# ---------------------------------------------------------------------------
-# Figure: the summary (this is the one for the paper)
-# ---------------------------------------------------------------------------
-
-
 def _frac_axis(ax, label: str = "% of the response seen") -> None:
-    """Shared x-axis treatment: prefix fraction, ticked as bare percentages.
-
-    The "%" lives in the axis label rather than on every tick -- four ticks each
-    carrying their own "%" is what pushes this axis into overlapping at
-    half-panel width.
-    """
     ax.set_xlim(0, 1)
     ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
     ax.set_xticklabels(["0", "25", "50", "75", "100"])
@@ -299,7 +194,6 @@ def _frac_axis(ax, label: str = "% of the response seen") -> None:
 
 
 def _pct_axis(ax, label: str) -> None:
-    """Shared y-axis treatment for a 0-1 share."""
     ax.set_ylim(0, 1.0)
     ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
     ax.set_yticklabels(["0", "25", "50", "75", "100"])
@@ -307,14 +201,6 @@ def _pct_axis(ax, label: str) -> None:
 
 
 def _panel_head(ax, letter: str, ylabel: str, pad: int = 26) -> None:
-    """Panel letter above a horizontal y-axis label.
-
-    The y-label is set flat at the top-left rather than rotated up the spine:
-    rotated labels force the reader to tilt their head for the one string that
-    says what the axis IS, and they eat left margin that the plot could use.
-    Both sit inside the space the title pad reserves, which is what keeps
-    constrained_layout aware of them (free-floating text is not).
-    """
     ax.set_ylabel("")
     ax.set_title(letter, loc="left", pad=pad, fontsize=11.5,
                  fontweight="bold", color=st.INK)
@@ -323,11 +209,8 @@ def _panel_head(ax, letter: str, ylabel: str, pad: int = 26) -> None:
 
 
 def _legend(ax, handles=None, loc="lower right"):
-    """Frameless-looking legend that still masks what runs underneath it.
-
-    `frameon=False` let the plateau rules and band edges cross the label text.
-    A surface-coloured patch with no edge reads as frameless but occludes.
-    """
+    # A surface-coloured patch with no edge reads as frameless but still masks
+    # whatever crosses under the label text.
     kw = dict(loc=loc, handlelength=1.5, borderpad=0.45, labelspacing=0.45,
               frameon=True, framealpha=1.0, facecolor=fm.SURFACE,
               edgecolor="none")
@@ -335,7 +218,6 @@ def _legend(ax, handles=None, loc="lower right"):
 
 
 def _polish(ax) -> None:
-    """Editorial axis treatment: hairline horizontal rules, no box."""
     ax.set_axisbelow(True)
     ax.grid(True, axis="y", color=fm.HAIRLINE, lw=0.8)
     ax.grid(False, axis="x")
@@ -347,24 +229,8 @@ def _polish(ax) -> None:
 
 
 def fig_summary(grid: Grid, out_dir: Path, name: str = "forecasting_summary"):
-    """The paper figure: the two pooled curves, and nothing else.
-
-    Deliberately bare -- no suptitle, no in-plot callouts. Every number that
-    used to be annotated onto the marks (the crossing point, the medians) is in
-    the report and the CSVs, and in a paper the explanation belongs in the
-    LaTeX caption, not burned into the image.
-
-    The per-cell breakdown that used to sit here as two heatmaps now lives only
-    in the report's markdown tables and `forecasting_summary.csv` -- the same
-    numbers, without spending half the figure on them.
-
-    SPREAD IS DRAWN AS BANDS, NOT AS 12 LINES
-    -----------------------------------------
-    The earlier draft drew every cell as its own faint line. Twelve overlapping
-    polylines read as noise, and the eye cannot recover a distribution from
-    them. Nested quantile bands (10-90 and 25-75 across cells) carry the same
-    spread as a shape, and let the mean stay the only line in the panel.
-    """
+    # Spread is drawn as nested quantile bands across cells (10-90, 25-75),
+    # not one line per cell -- 12 overlapping lines read as noise.
     fm.apply()
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -405,12 +271,9 @@ def fig_summary(grid: Grid, out_dir: Path, name: str = "forecasting_summary"):
         Patch(facecolor=CLEAN, alpha=0.11, lw=0, label="10th–90th percentile"),
     ])
 
-    # -- (b) lock-in CDF ----------------------------------------------------
-    # NOT filled under the curves. The two classes overlap almost everywhere,
-    # so two tinted areas stack into the grey-mauve that style.py warns about
-    # ("two mid-tones average to mud") and the hues stop being readable. The
-    # plateau each curve tops out at -- the share that never locks in -- is
-    # carried by a hairline rule in the curve's own colour instead.
+    # Not filled under the curves -- two overlapping tinted areas would mud
+    # into an unreadable hue (style.py); the never-locks-in plateau instead
+    # gets a hairline rule in the curve's own colour.
     for label, colour, lab in ((1, HALLU, "hallucinated"), (0, CLEAN, "clean")):
         cdf = grid.pooled_lockin_cdf(label)
         ax_cdf.axhline(cdf[-1], color=colour, ls=(0, (2, 3)), lw=1.1,
@@ -434,33 +297,17 @@ def fig_summary(grid: Grid, out_dir: Path, name: str = "forecasting_summary"):
 
 
 def fig_summary_by_model(grid: Grid, out_dir: Path, name: str = "forecasting_by_model"):
-    """Per-MODEL AUROC-vs-prefix lines, for a grid that is ONE dataset x
-    several models (e.g. the TriviaQA-only structure-analysis forecasting
-    sweep) -- fig_summary's pooled-band design is for a many-cell grid where
-    individual lines are noise; here there are only as many cells as models
-    (3-4), and which MODEL a line belongs to is exactly the comparison this
-    figure exists to make, so pooling it away would erase the point.
-
-    COLOUR: style.py validates only TWO CVD-safe categorical hues (see its
-    docstring), not enough for 4 models. Lines instead use ONE hue's
-    light-to-dark lightness ramp (style.SEQUENTIAL, sampled at 4 fixed
-    points) -- lightness differences stay perceptible under CVD where a 3rd+
-    arbitrary hue would not (style.py's own rejected-3rd-hue finding). Every
-    line is ALSO labelled directly at its right end, so identifying a line
-    never depends on colour discrimination alone.
-    """
+    # For a grid of one dataset x several models: fig_summary's pooled bands
+    # are for many-cell grids; here which model a line belongs to IS the
+    # comparison, so each gets its own labelled line instead.
     fm.apply()
     import matplotlib.pyplot as plt
     from matplotlib.patheffects import withStroke
 
     casing = [withStroke(linewidth=4.5, foreground=fm.SURFACE)]
 
-    # Fixed lightness steps (not len(cells)-dependent), so a given model's
-    # line is the same shade across different figures/subsets -- picked
-    # light-to-dark in LLM_ORDER so earlier-released/smaller models read
-    # lighter. Sampled from style.SEQUENTIAL, the one validated single-hue
-    # ramp (see style.py's docstring: "Light->dark keeps magnitude readable
-    # in greyscale and under CVD").
+    # Fixed lightness steps from style.SEQUENTIAL (not enough CVD-safe
+    # categorical hues for 4 models), light-to-dark in LLM_ORDER.
     shades = [st.SEQUENTIAL(x) for x in (0.35, 0.58, 0.78, 0.97)]
 
     cells = sorted(grid.cells, key=lambda c: grid.llms.index(c.llm) if c.llm in grid.llms else 99)
@@ -470,13 +317,8 @@ def fig_summary_by_model(grid: Grid, out_dir: Path, name: str = "forecasting_by_
 
     fig, ax = plt.subplots(figsize=(6.4, 4.4))
 
-    # Colour-matched legend handles, used INSTEAD OF end-of-line annotate()
-    # text: annotate(..., annotation_clip=False) draws outside the axes,
-    # which constrained_layout (set globally by fm.apply()) does not reserve
-    # room for, so the longest label silently clips at the figure edge
-    # (verified: fig.subplots_adjust is a no-op under constrained_layout and
-    # only raises a warning, it does not fix the clipping). A legend IS
-    # something constrained_layout accounts for automatically.
+    # Legend handles instead of end-of-line annotate(): annotate() outside the
+    # axes is not reserved space by constrained_layout and silently clips.
     from matplotlib.lines import Line2D
     handles = []
     for i, cell in enumerate(cells):
@@ -499,13 +341,7 @@ def fig_summary_by_model(grid: Grid, out_dir: Path, name: str = "forecasting_by_
     return fm.save(fig, out_dir, name)
 
 
-# ---------------------------------------------------------------------------
-# Figure: one compact row per cell
-# ---------------------------------------------------------------------------
-
-
 def fig_cell(cell: Cell, out_dir: Path):
-    """Three panels on one row: the curve, the lock-in CDF, the separation."""
     fm.apply()
     import matplotlib.pyplot as plt
 
@@ -528,8 +364,7 @@ def fig_cell(cell: Cell, out_dir: Path):
     lo, hi = 0.45, min(1.0, max(0.75, float(np.nanmax(cell.auroc)) + 0.06))
     if np.isfinite(e):
         ax_a.axvline(e, color=HALLU, ls="--", lw=1.4)
-        # Ride the top of the vline, flipping to its left half once the
-        # crossing is far enough right that the label would leave the axes.
+        # Flip label to the vline's left once it's far enough right to clip.
         right = e > 0.55
         ax_a.text(e + (-0.02 if right else 0.02), hi - 0.005,
                   f"{USABLE:.0%} of final\nby {pct(e)}",
@@ -541,10 +376,8 @@ def fig_cell(cell: Cell, out_dir: Path):
     _panel_head(ax_a, "(a)  Performance vs prefix", "score")
     _legend(ax_a)
 
-    # -- lock-in CDF --------------------------------------------------------
-    # Upper left is empty by construction in a CDF panel, which is where the
-    # one colour key for the whole figure goes -- HALLU/CLEAN mean the same
-    # thing in (b) and (c), so (c) does not repeat it.
+    # Upper left is empty by construction in a CDF panel: the one colour key
+    # for the whole figure goes there, so (c) does not repeat it.
     for label, colour, lab in ((1, HALLU, "hallucinated"), (0, CLEAN, "clean")):
         cdf = cell.lockin_cdf(label)
         ax_b.axhline(cdf[-1], color=colour, ls=(0, (2, 3)), lw=1.1,
@@ -561,12 +394,9 @@ def fig_cell(cell: Cell, out_dir: Path):
     _panel_head(ax_b, "(b)  Lock-in point", "% locked in")
     _legend(ax_b, loc="upper left")
 
-    # -- class separation ---------------------------------------------------
     for label, colour in ((1, HALLU), (0, CLEAN)):
         med, q1, q3 = cell.mean_prob_band(label)
-        # Two overlapping washes average to mud (see style.py). A thin edge in
-        # the band's own hue keeps each one's extent readable through the
-        # overlap, so the alpha can stay low enough not to muddy at all.
+        # Thin edge in each band's own hue keeps overlap readable at low alpha.
         ax_c.fill_between(FRACTIONS, q1, q3, color=colour, alpha=0.12, lw=0,
                           zorder=2)
         for edge in (q1, q3):
@@ -586,11 +416,6 @@ def fig_cell(cell: Cell, out_dir: Path):
              f"{cell.n:,} held-out responses · full-response AUROC "
              f"{cell.final_auroc:.3f} · usable by {pct(cell.earliness)}")
     return fm.save(fig, out_dir, cell.key)
-
-
-# ---------------------------------------------------------------------------
-# Tables
-# ---------------------------------------------------------------------------
 
 
 SUMMARY_COLUMNS = [
@@ -619,7 +444,6 @@ def _summary_row(c: Cell) -> dict:
 
 
 def write_tables(grid: Grid, out_dir: Path) -> list[Path]:
-    """Per-cell summary and the full AUROC/accuracy curves, as CSV."""
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
 
@@ -643,13 +467,7 @@ def write_tables(grid: Grid, out_dir: Path) -> list[Path]:
     return written
 
 
-# ---------------------------------------------------------------------------
-# Reports
-# ---------------------------------------------------------------------------
-
-
 def _grid_table(grid: Grid, fn, fmt=lambda v: pct(v)) -> str:
-    """Markdown 4x3 table of `fn(cell)`, datasets down, LLMs across."""
     head = "| | " + " | ".join(PRETTY_LLM.get(m, m) for m in grid.llms) + " |"
     rule = "|---" * (len(grid.llms) + 1) + "|"
     rows = []
@@ -663,7 +481,6 @@ def _grid_table(grid: Grid, fn, fmt=lambda v: pct(v)) -> str:
 
 
 def write_summary_report(grid: Grid, out_dir: Path, figure_rel: str) -> Path:
-    """The pooled report: the headline numbers, the grid, and what they mean."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
     n_total = sum(c.n for c in grid.cells)
@@ -673,9 +490,8 @@ def write_summary_report(grid: Grid, out_dir: Path, figure_rel: str) -> Path:
     med_h = grid.pooled_median_lockin(1)
     med_c = grid.pooled_median_lockin(0)
 
-    # Best/worst must range over cells that actually HAVE the statistic. A cell
-    # whose AUROC is undefined (a single-class slice, say) is unmeasurable, not
-    # the worst performer, and naming it as the worst misreports the grid.
+    # Best/worst range only over cells with a defined statistic; an undefined
+    # AUROC (single-class slice) is unmeasurable, not the worst performer.
     measured = [c for c in grid.cells if np.isfinite(c.earliness)]
     early_vals = np.array([c.earliness for c in measured])
     locked = [c for c in grid.cells if np.isfinite(c.median_lockin(1))]
@@ -704,13 +520,9 @@ def write_summary_report(grid: Grid, out_dir: Path, figure_rel: str) -> Path:
         "No cell has a defined median lock-in for hallucinated responses."
     )
 
-    # Claims about SHAPE have to be read off the data, not asserted: which
-    # class locks in first, and where the curve stops climbing, both flip
-    # depending on the corpus. An earlier draft hard-coded both and was wrong
-    # the moment the numbers moved.
+    # Shape claims (which class locks in first, where the curve plateaus) are
+    # read off the data rather than asserted, since both flip by corpus.
     mean_curve = grid.mean_auroc
-    # The band the figure draws, quoted at the headline prefix so the prose and
-    # the panel cannot describe different things.
     k_head = int(np.argmin(np.abs(FRACTIONS - HEADLINE_FRACTION)))
     auroc_stack = np.stack([c.auroc for c in grid.cells])
     band_lo, band_hi = np.nanpercentile(auroc_stack[:, k_head], [10, 90])
@@ -845,7 +657,6 @@ Per-cell figures and reports are in `cells/`. Raw numbers are in
 
 def write_cell_report(cell: Cell, out_dir: Path, figure_rel: str,
                       provenance: dict) -> Path:
-    """One page per cell, with the same statistics as the summary."""
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = "\n".join(
         f"| {f:.0%} | {cell.auroc[k]:.4f} | {cell.accuracy[k]:.4f} |"
@@ -888,13 +699,7 @@ See [../report.md](../report.md) for the pooled view across every cell.
     return dest
 
 
-# ---------------------------------------------------------------------------
-# Entry points
-# ---------------------------------------------------------------------------
-
-
 def build_cell(cell: Cell, docs: "ForecastPaths", provenance: dict) -> Path:
-    """Per-cell figure + report."""
     fig_cell(cell, docs.cell_figures)
     return write_cell_report(
         cell, docs.cell_reports,
@@ -904,17 +709,10 @@ def build_cell(cell: Cell, docs: "ForecastPaths", provenance: dict) -> Path:
 
 
 def build_summary(grid: Grid, docs: "ForecastPaths") -> Path:
-    """Pooled figure, tables, and the summary report.
-
-    When the grid spans exactly one dataset (e.g. a TriviaQA-only sweep
-    across models, as opposed to the full LLM x dataset grid), ALSO draws
-    fig_summary_by_model -- fig_summary's pooled bands make sense across many
-    cells, but with only as many cells as models, the per-model identity IS
-    the comparison, so it gets its own line, not an average. A multi-dataset
-    grid skips this (it would conflate "which model" with "which dataset" in
-    one set of lines, which fig_summary_by_model was not designed to show).
-    """
     fig_summary(grid, docs.figures)
+    # Per-model lines only make sense for a single-dataset grid (e.g. a
+    # TriviaQA-only sweep across models) -- otherwise model and dataset
+    # identity would be conflated in one set of lines.
     if len({c.dataset for c in grid.cells}) == 1:
         fig_summary_by_model(grid, docs.figures)
     write_tables(grid, docs.tables)
@@ -928,12 +726,6 @@ def build_summary(grid: Grid, docs: "ForecastPaths") -> Path:
 
 @dataclass
 class ForecastPaths:
-    """Where every forecasting artifact goes under `docs/`.
-
-    One object so the figure, the report and the markdown link that points from
-    one to the other cannot drift apart.
-    """
-
     root: Path
 
     @property
@@ -963,7 +755,6 @@ class ForecastPaths:
     def cache_file(self, key: str) -> Path:
         return self.cache / f"{key}.npz"
 
-    # -- links, written from the report's own directory --------------------
     def rel_summary_figure(self) -> str:
         return "../../figures/forecasting/forecasting_summary.png"
 

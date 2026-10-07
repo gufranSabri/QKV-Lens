@@ -1,21 +1,3 @@
-"""Export one CSV per (dataset, model) pair: prompt, gold, generated_response,
-bleurt_score, hallucination_label -- QKV-Steer's own extracted+labeled data,
-read straight from disk (no re-generation, no re-scoring).
-
-Response text comes from meta.txt (the only place it's stored); score/label
-come from manifest.jsonl, the authoritative source -- meta.txt's own
-score/label fields go stale after `detector.py label` reruns (relabel() only
-rewrites manifest.jsonl, see src/extract/run_extraction.py).
-
-Writes to data/exports/{dataset}_{llm_alias}.csv (excludes the "hallushift"
-and training-free-baseline sibling trees under data_root -- see
-corpus_stats.py's EXCLUDED_TOP_LEVEL for the same reasoning: each holds a
-different method's own output, not another (dataset, llm_alias) tree of
-prompts/responses).
-
-Usage:
-    python3 scripts/analysis/export_responses_csv.py [--config configs/default.yaml] [--out-dir data/exports]
-"""
 from __future__ import annotations
 
 import argparse
@@ -32,8 +14,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.baselines.common import METHODS as BASELINE_METHODS  # noqa: E402
 from src.extract.run_extraction import parse_meta  # noqa: E402
 
-#: See corpus_stats.py's EXCLUDED_TOP_LEVEL -- every method's own output
-#: tree, none of which is a (dataset, llm_alias) tree of prompts/responses.
+# Top-level entries under data_root that are method outputs, not (dataset, llm_alias) trees.
 EXCLUDED_TOP_LEVEL = {"hallushift", "baselines", *BASELINE_METHODS}
 
 

@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""One presentable markdown digest of every ablation/analysis sweep's
-headline numbers -- read this first, before deciding which settings to run
-as the paper's main experiments.
-
-Reads whatever CSVs/reports the individual sweeps have already written under
-docs/tables/ and docs/reports/ (each sweep's own script, run via
-scripts/experiments/run_ablations.sh); never recomputes anything itself. A
-sweep that hasn't been run yet is reported as "not yet run", not an error --
-this can be re-run at any point to see partial progress.
-
-    python scripts/analysis/ablation_summary.py
-"""
+# Reads CSVs/reports the sweeps already wrote (all_experiments.sh); never recomputes.
 
 from __future__ import annotations
 
@@ -52,8 +41,39 @@ def _pct(x, default="-"):
         return default
 
 
+def section_layer_cnn_grid(lines: list[str]) -> None:
+    lines.append("## 1. LayerCNN grid search: KERNEL_SIZE / CONV_OUT_CHANNELS (llama3.1_8b, TriviaQA)")
+    rows = _read_csv(TABLES / "layer_cnn_grid.csv")
+    if rows is None:
+        lines.append("\n_Not yet run._ See `scripts/experiments/layer_cnn_grid.sh`.\n")
+        return
+
+    valid = [r for r in rows if r["auroc"]]
+    if not valid:
+        lines.append("\n_Run but no cell produced a result yet._\n")
+        return
+    best = max(valid, key=lambda r: float(r["auroc"]))
+    lines.append("")
+    lines.append(
+        f"Best cell: **KERNEL_SIZE=STRIDE={best['kernel_size']}, "
+        f"CONV_OUT_CHANNELS={best['conv_out_channels']}** -- AUROC {_pct(best['auroc'])}. "
+        "`layer_cnn.py` is left set to this combo by the sweep script, so "
+        "every `model.backbone=layer_cnn` run below (this repo's MAIN "
+        "backbone -- representation/pooling/collapse ablations, structure "
+        "analysis, main results) already trains against it."
+    )
+    lines.append("")
+    lines.append("| KERNEL_SIZE (=STRIDE) | CONV_OUT_CHANNELS | AUROC |")
+    lines.append("|---|---|---|")
+    for r in sorted(valid, key=lambda r: -float(r["auroc"])):
+        lines.append(f"| {r['kernel_size']} | {r['conv_out_channels']} | {_pct(r['auroc'])} |")
+    lines.append("")
+    lines.append("Full table: `docs/tables/layer_cnn_grid.md`.")
+    lines.append("")
+
+
 def section_representation(lines: list[str]) -> None:
-    lines.append("## 1. Representation ablation (Q/K/V + hidden states)")
+    lines.append("## 2a. Representation ablation (Q/K/V + hidden states)")
     rows = _read_csv(TABLES / "representation_ablation.csv")
     if rows is None:
         lines.append("\n_Not yet run._ See `scripts/experiments/representation_ablation.sh`.\n")
@@ -85,12 +105,18 @@ def section_representation(lines: list[str]) -> None:
             f"| {_pct(qkv)} | {_pct(hs)} |"
         )
     lines.append("")
+    lines.append(
+        "This result feeds step 5 below: a majority vote over each model's "
+        "own best row here picks the representation used for the main "
+        "results (ties/no-majority default to QKV)."
+    )
+    lines.append("")
     lines.append("Full table: `docs/tables/representation_ablation.md`.")
     lines.append("")
 
 
 def section_pooling(lines: list[str]) -> None:
-    lines.append("## 2. n_segments / pooling ablation (llama2_7b, TriviaQA)")
+    lines.append("## 2b. n_segments / pooling ablation (llama3.1_8b, TriviaQA)")
     rows = _read_csv(TABLES / "pooling_ablation.csv")
     if rows is None:
         lines.append("\n_Not yet run._ See `scripts/experiments/pooling_ablation.sh`.\n")
@@ -117,7 +143,7 @@ def section_pooling(lines: list[str]) -> None:
 
 
 def section_collapse(lines: list[str]) -> None:
-    lines.append("## 3. Feature-pooling (collapse-axis) ablation (llama3.1_8b, TriviaQA)")
+    lines.append("## 2c. Feature-pooling (collapse-axis) ablation (llama3.1_8b, TriviaQA)")
     rows = _read_csv(TABLES / "collapse_axis_ablation.csv")
     if rows is None:
         lines.append("\n_Not yet run._ See `scripts/experiments/collapse_axis_ablation.sh`.\n")
@@ -149,7 +175,7 @@ def section_collapse(lines: list[str]) -> None:
 
 
 def section_structure(lines: list[str]) -> None:
-    lines.append("## 4. Structure-preservation analysis (llama3.1_8b, TriviaQA)")
+    lines.append("## 3. Structure-preservation analysis (llama3.1_8b, TriviaQA)")
     rows = _read_csv(TABLES / "structure_analysis.csv")
     if rows is None:
         lines.append("\n_Not yet run._ See `scripts/experiments/structure_analysis.sh`.\n")
@@ -159,8 +185,9 @@ def section_structure(lines: list[str]) -> None:
     lines.append("")
     lines.append("| Arm | AUROC | $\\Delta$ vs flat_mlp |")
     lines.append("|---|---|---|")
-    for arm, label in (("flat", "flat_mlp (main approach)"),
-                       ("cnn", "scratch_cnn (with spatial structure)"),
+    for arm, label in (("flat", "flat_mlp (no spatial structure)"),
+                       ("layer", "layer_cnn (MAIN backbone, mixes L only)"),
+                       ("grid", "grid_cnn (mixes L and M jointly)"),
                        ("permL42", "flat_mlp + layer permutation")):
         r = by_arm.get(arm)
         if r is None:
@@ -169,13 +196,22 @@ def section_structure(lines: list[str]) -> None:
             lines.append(f"| {label} | {_pct(r['auroc'])} | {r['delta_vs_flat'] or '--'} |")
     lines.append("")
 
-    flat_r, cnn_r, perm_r = by_arm.get("flat"), by_arm.get("cnn"), by_arm.get("permL42")
-    if flat_r and flat_r["auroc"] and cnn_r and cnn_r["auroc"]:
-        flat_auroc, cnn_auroc = float(flat_r["auroc"]), float(cnn_r["auroc"])
-        verdict = "scratch_cnn beats flat_mlp" if cnn_auroc > flat_auroc else "flat_mlp holds or beats scratch_cnn"
+    flat_r = by_arm.get("flat")
+    layer_r, grid_r, perm_r = by_arm.get("layer"), by_arm.get("grid"), by_arm.get("permL42")
+    if flat_r and flat_r["auroc"] and layer_r and layer_r["auroc"]:
+        flat_auroc, layer_auroc = float(flat_r["auroc"]), float(layer_r["auroc"])
+        verdict = "layer_cnn beats flat_mlp" if layer_auroc > flat_auroc else "flat_mlp holds or beats layer_cnn"
         lines.append(
             f"- **Spatial structure:** {verdict} "
-            f"(scratch_cnn {_pct(cnn_auroc)} vs flat_mlp {_pct(flat_auroc)})."
+            f"(layer_cnn {_pct(layer_auroc)} vs flat_mlp {_pct(flat_auroc)})."
+        )
+    if layer_r and layer_r["auroc"] and grid_r and grid_r["auroc"]:
+        layer_auroc, grid_auroc = float(layer_r["auroc"]), float(grid_r["auroc"])
+        verdict = ("L-only mixing beats joint L+M mixing" if layer_auroc > grid_auroc
+                   else "joint L+M mixing holds or beats L-only mixing")
+        lines.append(
+            f"- **Which axes to mix:** {verdict} "
+            f"(layer_cnn {_pct(layer_auroc)} vs grid_cnn {_pct(grid_auroc)})."
         )
     if flat_r and flat_r["auroc"] and perm_r and perm_r["auroc"]:
         flat_auroc, perm_auroc = float(flat_r["auroc"]), float(perm_r["auroc"])
@@ -190,8 +226,71 @@ def section_structure(lines: list[str]) -> None:
     lines.append("")
 
 
+def section_main_results(lines: list[str]) -> None:
+    lines.append("## 5. Winning representation + main results (4 models x 3 datasets)")
+    rows = _read_csv(TABLES / "representation_ablation.csv")
+    if rows is None:
+        lines.append(
+            "\n_Not yet run._ `all_experiments.sh` step 5 reads "
+            "`docs/tables/representation_ablation.csv`, picks the majority-"
+            "vote winning representation, and trains+tests all 4 models x "
+            "3 datasets against it (`runs/{model}_{dataset}/`).\n"
+        )
+        return
+
+    from collections import Counter
+
+    best_per_model: dict[str, tuple[str, float]] = {}
+    for r in rows:
+        if not r["auroc"]:
+            continue
+        auroc = float(r["auroc"])
+        cur = best_per_model.get(r["model"])
+        if cur is None or auroc > cur[1]:
+            best_per_model[r["model"]] = (r["representation"], auroc)
+
+    if not best_per_model:
+        lines.append("\n_Representation ablation ran but produced no result yet._\n")
+        return
+
+    votes = Counter(repr_ for repr_, _ in best_per_model.values())
+    top, top_n = votes.most_common(1)[0]
+    n_models = len(best_per_model)
+    winner = top if top_n > n_models / 2 else "QKV"
+
+    lines.append("")
+    lines.append(
+        f"Majority vote over {n_models} model(s)' best representation: "
+        f"{dict(votes)} -> **{winner}**"
+        + ("" if winner == top else " (no majority, defaulted to QKV)") + "."
+    )
+    lines.append("")
+
+    datasets = ["triviaqa", "truthfulqa", "coqa"]
+    dataset_pretty = {"triviaqa": "TriviaQA", "truthfulqa": "TruthfulQA", "coqa": "CoQA"}
+    lines.append(f"Main results (representation = **{winner}**):")
+    lines.append("")
+    lines.append("| Model | " + " | ".join(dataset_pretty[d] for d in datasets) + " |")
+    lines.append("|---|" + "---|" * len(datasets))
+    from scripts.tables.collect_runs import load_runs
+    runs = load_runs(REPO_ROOT / "runs")
+    by_model_ds = {(r["llm"], r["dataset"]): r["auroc"] for r in runs
+                   if r["run"] == f"{r['llm']}_{r['dataset']}"}
+    for model in PRETTY_LLM:
+        cells = [_pct(by_model_ds.get((model, d))) for d in datasets]
+        lines.append(f"| {PRETTY_LLM[model]} | " + " | ".join(cells) + " |")
+    lines.append("")
+    lines.append(
+        "Checkpoints: `runs/{model}_{dataset}/best.pt` -- same layout as "
+        "`all-datasets_run.sh`'s own main-results runs, so step 6's "
+        "significance/prototype/IG/forecasting figures below read these "
+        "directly."
+    )
+    lines.append("")
+
+
 def section_significance(lines: list[str]) -> None:
-    lines.append("## 5. Significance / diffuseness analysis (all 4 models)")
+    lines.append("## 6a. Significance / diffuseness analysis (all 4 models)")
     rows = _read_csv(TABLES / "significance_stats.csv")
     if rows is None:
         lines.append("\n_Not yet run._ See `python scripts/analysis/significance.py`.\n")
@@ -223,8 +322,60 @@ def section_significance(lines: list[str]) -> None:
     lines.append("")
 
 
+def section_qualitative(lines: list[str]) -> None:
+    lines.append("## 6b. Qualitative maps: confusion examples + class-average prototypes (TriviaQA)")
+    stats_path = REPO_ROOT / "docs" / "figures" / "prototype_stats.json"
+    if not stats_path.exists():
+        lines.append(
+            "\n_Not yet run._ See `python scripts/figures/qualitative_maps.py "
+            "--model <model>` (run per model by `all_experiments.sh` step 6).\n"
+        )
+        return
+
+    import json
+    stats = json.loads(stats_path.read_text())
+    lines.append("")
+    lines.append(
+        "Per-layer mean |difference| between hallucinated and non-"
+        "hallucinated class-average feature maps (most recently run model):"
+    )
+    lines.append("")
+    lines.append("| Projection | Peak layer | Peak |diff| | Mean |diff| |")
+    lines.append("|---|---|---|---|")
+    for proj, s in stats.items():
+        lines.append(
+            f"| {proj} | {s['peak_layer']} | {s['peak_value']:.5f} | {s['mean_abs_diff']:.5f} |"
+        )
+    lines.append("")
+    lines.append(
+        "Figures: `docs/figures/confusion_examples.png` (one real example per "
+        "confusion-matrix cell) and `docs/figures/prototype_maps.png` (what a "
+        "hallucination looks like on average)."
+    )
+    lines.append("")
+
+
+def section_attribution(lines: list[str]) -> None:
+    lines.append("## 6c. Integrated Gradients attribution heatmap (TriviaQA, 4 models)")
+    fig_path = REPO_ROOT / "docs" / "figures" / "f1a_cam_response_heatmap.png"
+    if not fig_path.exists():
+        lines.append(
+            "\n_Not yet run._ See `python scripts/figures/attribution_heatmap.py`.\n"
+        )
+        return
+    lines.append("")
+    lines.append(
+        "Where the detector looks across a generated response, per model "
+        "(rows) and relative position in the response (columns): "
+        "`docs/figures/f1a_cam_response_heatmap.png`. Works for any backbone "
+        "(layer_cnn, flat_mlp, grid_cnn) -- see `src/cam.py`'s docstring for "
+        "why Integrated Gradients needs no backbone-specific hooking."
+    )
+    lines.append("")
+
+
 def section_forecasting(lines: list[str]) -> None:
-    lines.append("## 6. Forecasting: how early is the verdict usable? (TriviaQA, 4 models)")
+    lines.append("## 6d. Forecasting: how early is the verdict usable? (TriviaQA, 4 models)")
     rows = _read_csv(TABLES / "forecasting" / "forecasting_summary.csv")
     if rows is None:
         lines.append("\n_Not yet run._ See `python scripts/analysis/run_all.py`.\n")
@@ -255,19 +406,25 @@ def main() -> None:
         "# Ablation & analysis summary",
         "",
         "Headline numbers from every ablation/analysis sweep "
-        "(`scripts/experiments/run_ablations.sh`), in one place. Each "
+        "(`scripts/experiments/all_experiments.sh`), in one place. Each "
         "section links to its own full table/figure for the complete "
-        "picture -- use this to decide which settings to carry into the "
-        "paper's main experiments, not as the final word on any one of them.",
+        "picture. `layer_cnn` is this repo's MAIN backbone (see step 1); "
+        "step 5 picks the winning representation and runs the actual main "
+        "results, so by the time this report is read, "
+        "`runs/{model}_{dataset}/` already reflects everything above it.",
         "",
     ]
 
     for fn in (
+        section_layer_cnn_grid,
         section_representation,
         section_pooling,
         section_collapse,
         section_structure,
+        section_main_results,
         section_significance,
+        section_qualitative,
+        section_attribution,
         section_forecasting,
     ):
         fn(lines)

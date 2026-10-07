@@ -1,10 +1,6 @@
-"""Temporal head: a sequence of token embeddings -> one hallucination logit.
-
-Responses have different lengths, so every operation here must respect the
-padding mask. Getting this wrong does not crash -- it silently lets padding
-contaminate the pooled representation and quietly corrupts every metric. Each
-component below therefore handles the mask explicitly.
-"""
+# Temporal head: token embeddings -> one hallucination logit. Every op here
+# must respect the padding mask, or padding silently corrupts the pooled
+# representation and every downstream metric.
 
 from __future__ import annotations
 
@@ -13,12 +9,6 @@ import torch.nn as nn
 
 
 class MaskedAttentionPool(nn.Module):
-    """Attention pooling over the token axis, with padding excluded.
-
-    Padded positions get -inf attention logits, so after the softmax they receive
-    exactly zero weight -- they cannot leak into the pooled vector.
-    """
-
     def __init__(self, dim: int):
         super().__init__()
         self.score = nn.Linear(dim, 1)
@@ -37,13 +27,7 @@ class MaskedAttentionPool(nn.Module):
 
 
 class TemporalEncoder(nn.Module):
-    """Conv1d (local n-grams) -> BiLSTM (long range) -> masked attention pool.
-
-    The paper's temporal stage (Eq. 10-12), with attention pooling in place of
-    the plain temporal mean: padding makes a masked pool necessary anyway, and
-    the resulting per-token weights are directly readable as "which generated
-    token drove this prediction" -- useful when reasoning about where to steer.
-    """
+    # Conv1d (local n-grams) -> BiLSTM (long range) -> masked attention pool.
 
     def __init__(
         self,
@@ -81,9 +65,6 @@ class TemporalEncoder(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # x: (B, T, F), mask: (B, T) bool
         if not mask.any(dim=1).all():
-            # pack_padded_sequence raises an opaque error on a zero-length row.
-            # An example with no tokens should never reach here (extraction skips
-            # empty generations), so this is a bug signal, not a case to handle.
             empty = (~mask.any(dim=1)).nonzero().flatten().tolist()
             raise ValueError(
                 f"batch rows {empty} have an all-False mask (zero real tokens). "
@@ -91,9 +72,7 @@ class TemporalEncoder(nn.Module):
             )
 
         if self.convs is not None:
-            # Zero the padding BEFORE convolving: a conv has a receptive field, so
-            # junk in padded positions would bleed into the last real token's
-            # output. Zeroing first makes that contribution zero.
+            # zero padding before convolving so it can't bleed into real tokens
             x = x * mask.unsqueeze(-1)
             x = self.convs(x.transpose(1, 2)).transpose(1, 2)   # (B, T, F)
             x = x * mask.unsqueeze(-1)
@@ -103,8 +82,6 @@ class TemporalEncoder(nn.Module):
             x, lengths, batch_first=True, enforce_sorted=False
         )
         packed_out, _ = self.lstm(packed)
-        # Padding never enters the LSTM recurrence at all thanks to packing; the
-        # backward direction correctly starts at each sequence's true last token.
         out, _ = nn.utils.rnn.pad_packed_sequence(
             packed_out, batch_first=True, total_length=mask.shape[1]
         )

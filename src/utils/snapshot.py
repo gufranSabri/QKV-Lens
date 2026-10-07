@@ -1,9 +1,5 @@
-"""Copies the code that produced a run into the run's own directory.
-
-Configs and CLI flags are recorded elsewhere (config.json), but the code
-itself changes over time. Without a snapshot, reproducing an old run means
-trusting that the right git commit is still checked out.
-"""
+# Copies the code that produced a run into the run's own directory, so
+# reproducing an old run doesn't depend on the right git commit still being checked out.
 
 from __future__ import annotations
 
@@ -12,7 +8,6 @@ from pathlib import Path
 
 from src.config import REPO_ROOT
 
-#: Copied verbatim into every run's code/ snapshot.
 SNAPSHOT_PATHS = ("src", "detector.py", "configs")
 
 _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")

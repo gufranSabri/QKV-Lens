@@ -1,5 +1,3 @@
-"""Evaluation metrics. AUROC is primary (both baselines report it)."""
-
 from __future__ import annotations
 
 import numpy as np
@@ -16,12 +14,7 @@ from sklearn.metrics import (
 
 
 def tpr_at_fpr(y_true, y_score, target_fpr: float = 0.05) -> float:
-    """TPR at the largest FPR that does not exceed `target_fpr`. ACT-ViT's metric.
-
-    Useful because a hallucination detector is deployed at a low false-alarm
-    budget: "how many hallucinations do we catch if we may only bother the user
-    5% of the time on correct answers".
-    """
+    # TPR at the largest FPR that does not exceed target_fpr
     fpr, tpr, _ = roc_curve(y_true, y_score)
     ok = np.where(fpr <= target_fpr)[0]
     return float(tpr[ok[-1]]) if len(ok) else 0.0

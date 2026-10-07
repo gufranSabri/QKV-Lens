@@ -1,11 +1,7 @@
-"""Stratified train/test split, persisted so runs are comparable.
-
-Mirrors HalluShift's classifier.train_combined_model: a single stratified
-sklearn.train_test_split(test_size=..., stratify=y, random_state=seed) into
-train and test, with the *same* test set doubling as the early-stopping
-validation signal (see hallushift/classifier.py:104-138). There is no
-separate held-out set -- `val` and `test` below are the same indices.
-"""
+# Stratified train/test split, persisted so runs are comparable. Mirrors
+# HalluShift's classifier.train_combined_model: a single stratified split,
+# with the same held-out set doubling as the early-stopping signal -- there
+# is no separate validation set (val == test below).
 
 from __future__ import annotations
 
@@ -27,21 +23,7 @@ def make_split(
     seed: int = 0,
     cache: Path | None = None,
 ) -> tuple[list[int], list[int], list[int]]:
-    """Stratified split of indices into (train, val, test), val == test.
-
-    Stratified because hallucination rates are often far from 50/50; a random
-    split could hand the eval set a wildly different positive rate and make
-    its AUROC incomparable to train.
-
-    Every dataset here has a single upstream split (see datasets.SPLIT_SOURCES),
-    so the only honest test set is one we carve out ourselves -- 25%, matching
-    the paper's 75/25 ratio and HalluShift's `test_size`. `test_fraction=0`
-    would yield an empty eval split and fall back to `val_fraction`; it is kept
-    only so the function stays total.
-
-    Persisted to `cache` so that repeated runs (and the model-selection decisions
-    they drive) all see the same split.
-    """
+    # Stratified split of indices into (train, val, test), val == test.
     key = {"n": len(labels), "seed": seed,
            "val_fraction": val_fraction, "test_fraction": test_fraction}
 

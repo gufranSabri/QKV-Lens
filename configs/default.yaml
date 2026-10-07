@@ -1,9 +1,5 @@
-# QKV-Steer defaults.
-#
-# The QKV-Lens method's own settings are FIXED IN CODE and are not keys here --
-# the (T, L, M, 3) field layout with Q/K/V on the channel axis, mean pooling,
-# and greedy decoding. See src/config.py's module docstring for the full list
-# and the reasoning. What remains below is what genuinely varies per run.
+# QKV-Steer defaults. Fixed-in-code settings (field layout, mean pooling,
+# greedy decoding) are not keys here -- see the top of src/config.py.
 
 llm:
   name: meta-llama/Meta-Llama-3-8B-Instruct
@@ -29,11 +25,7 @@ labeling:
   bleurt_checkpoint: models/BLEURT-20-D12
 
 model:
-  # flat_mlp is the main approach (flattens the (L,M,3) field, no spatial
-  # structure preserved). scratch_cnn (BAFE, the original QKV-Lens CNN)
-  # remains as the structure-preservation ablation's "with spatial structure"
-  # arm -- select via --set model.backbone=scratch_cnn.
-  backbone: flat_mlp # flat_mlp | scratch_cnn
+  backbone: layer_cnn # layer_cnn (MAIN) | flat_mlp | grid_cnn | layer_attn | layer_mha | layer_vit
   embed_dim: 2048 # E: backbone output per token
   conv1d_layers: 2
   lstm_hidden: 2048

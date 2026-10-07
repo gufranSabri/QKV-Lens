@@ -11,13 +11,10 @@ Runs the prefix sweep for ONE (LLM, dataset) cell and writes, under `docs/`:
     reports/forecasting/cells/<llm>_<dataset>.md
     forecasting_cache/<llm>_<dataset>.npz          (raw trajectories)
 
-The cache is what makes the figures cheap to iterate on: the sweep needs a GPU
-and the extracted field, redrawing does not. Pass `--from-cache` to rebuild the
-figure and report from a previous sweep without touching either.
-
-For the whole 4x3 grid and the pooled summary figure, use `run_all.py` — that is
-the entry point that produces the paper figure. See `forecasting.py` for the
-method and `forecasting_report.py` for what is drawn.
+Pass `--from-cache` to rebuild the figure and report from a previous sweep
+without re-running the detector. For the whole 4x3 grid and the pooled summary
+figure, use `run_all.py`. See `forecasting.py` for the method and
+`forecasting_report.py` for what is drawn.
 """
 
 from __future__ import annotations
@@ -26,9 +23,6 @@ import argparse
 import sys
 from pathlib import Path
 
-# Allow `python scripts/analysis/run_forecasting.py` from the repo root
-# without an editable install -- scripts/analysis sits beside src/, not
-# inside it, so the repo root needs to be on sys.path for both.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -44,14 +38,11 @@ from src.utils.seed import seed_everything                     # noqa: E402
 
 logger = get_logger(__name__)
 
-#: Default cap on evaluated examples. The sweep is T detector passes per
-#: example (~64 here), so the full 2490-row held-out split is ~159k passes.
-#: 500 gives a trustworthy picture in a fraction of the time; --limit 0 runs all.
+# The sweep is T detector passes per example, so this caps runtime; --limit 0 runs all.
 DEFAULT_LIMIT = 500
 
 
 def add_common_args(p: argparse.ArgumentParser) -> None:
-    """Arguments shared with run_all.py, so the two cannot drift apart."""
     p.add_argument(
         "--limit", type=int, default=DEFAULT_LIMIT,
         help=f"evaluate at most this many held-out examples "
@@ -83,11 +74,6 @@ def run_cell(
     from_cache: bool,
     overrides: dict | None = None,
 ) -> Cell:
-    """Sweep (or load) one cell and write its figure and report.
-
-    Returns the `Cell` so `run_all.py` can pool it into the summary without
-    recomputing anything.
-    """
     cfg = load_config(config_path, overrides=overrides or {})
     seed_everything(cfg.train.seed)
 

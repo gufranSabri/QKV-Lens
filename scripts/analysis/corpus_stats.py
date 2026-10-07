@@ -1,16 +1,3 @@
-"""Compute corpus-wide stats over the migrated QKV-Steer-data tree and write
-a markdown report.
-
-Reads manifest.jsonl (idx, dir, n_tokens, score, label) per (dataset, llm)
-pair under data_root -- no tensors are loaded, so this is fast even at 75k
-examples. Pairs whose relabeling (BLEURT rescoring after the run-on
-truncation migration) hasn't finished yet still show up, with their
-unlabeled count called out explicitly rather than silently mixed into the
-hallucination rate.
-
-Usage:
-    python3 scripts/analysis/corpus_stats.py [--config configs/default.yaml] [--out docs/tables/corpus_stats.md]
-"""
 from __future__ import annotations
 
 import argparse
@@ -76,14 +63,7 @@ def stats_for_pair(dataset: str, llm_alias: str, root: Path) -> dict:
     }
 
 
-#: Top-level entries under data_root that are NOT (dataset, llm_alias) trees.
-#: Each is some METHOD's own output, laid out as {method}/{dataset}/{llm_alias}
-#: with no manifest.jsonl -- walking one as a dataset would read its {dataset}
-#: dirs as "models" and either crash or silently emit garbage rows.
-#: "hallushift" is scripts/reproducing_baselines/hallushift's; the rest are the
-#: training-free baselines' (scripts/baselines/common.method_dir and
-#: shared_dir), which is why the list is imported from there rather than
-#: restated -- adding a baseline must not silently corrupt this report.
+# Top-level entries under data_root that are method outputs, not (dataset, llm_alias) trees.
 EXCLUDED_TOP_LEVEL = {"hallushift", "baselines", *BASELINE_METHODS}
 
 
@@ -136,7 +116,6 @@ def build_report(rows: list[dict]) -> str:
             f"{fmt_num(r['mean_score'], 3)} | {fmt_num(r['mean_n_tokens'], 1)} |"
         )
 
-    # ---- per-dataset rollup (across models) ----
     lines.append("\n## Per dataset (across all models)\n")
     lines.append("| Dataset | Total | Labeled | Hallucinated | Hallucination rate |")
     lines.append("|---|---:|---:|---:|---:|")
@@ -152,7 +131,6 @@ def build_report(rows: list[dict]) -> str:
             f"| {dataset} | {total} | {labeled} | {hall} | {fmt_pct(rate)} |"
         )
 
-    # ---- per-model rollup (across datasets) ----
     lines.append("\n## Per model (across all datasets)\n")
     lines.append("| Model | Total | Labeled | Hallucinated | Hallucination rate |")
     lines.append("|---|---:|---:|---:|---:|")
@@ -168,7 +146,6 @@ def build_report(rows: list[dict]) -> str:
             f"| {llm} | {total} | {labeled} | {hall} | {fmt_pct(rate)} |"
         )
 
-    # ---- grand total ----
     total = sum(r["total"] for r in rows)
     labeled = sum(r["labeled"] for r in rows)
     unlabeled = sum(r["unlabeled"] for r in rows)

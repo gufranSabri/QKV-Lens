@@ -1,4 +1,4 @@
-"""Console + file logging, configured once."""
+# Console + file logging, configured once.
 
 from __future__ import annotations
 

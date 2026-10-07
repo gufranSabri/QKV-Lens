@@ -7,10 +7,3 @@ llm:
 dataset:
   name: truthfulqa
   n_samples: 817
-  max_new_tokens: 64          # HalluShift: greedy, 64 new tokens
-  prompt_template: "Answer the question concisely. Q: {question} A:"
-
-labeling:
-  scheme: bleurt              # HalluShift labels with BLEURT-20-D12
-  bleurt_threshold: 0.5       # hallucination = 1 if max BLEURT <= 0.5
-  bleurt_checkpoint: models/BLEURT-20-D12
