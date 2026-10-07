@@ -20,9 +20,10 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
-# layer_cnn (mixes across L only) is the MAIN backbone; flat_mlp and
-# grid_cnn are the structure-preservation ablation's comparison arms.
-VALID_BACKBONES = ("flat_mlp", "layer_cnn", "grid_cnn")
+# layer_grid (gated local conv residual over L, collapses to flat_mlp at
+# init) is the MAIN backbone; flat_mlp (no spatial structure) is the
+# structure-preservation ablation's comparison arm.
+VALID_BACKBONES = ("layer_grid", "flat_mlp")
 VALID_SCHEMES = ("exact_match", "bleurt")
 VALID_SOURCES = ("qkv", "hidden-states")
 VALID_COLLAPSE_AXES = ("M", "L", "channels")
@@ -79,7 +80,7 @@ class LabelingConfig:
 
 @dataclass
 class ModelConfig:
-    backbone: str = "layer_cnn"
+    backbone: str = "layer_grid"
     embed_dim: int = 2048       # E: backbone output per token
     conv1d_layers: int = 2
     lstm_hidden: int = 2048

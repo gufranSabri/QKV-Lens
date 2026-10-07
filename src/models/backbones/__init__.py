@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 from .flat_mlp import FlatMLP
-from .grid_cnn import GridCNN
-from .layer_cnn import LayerCNN
+from .layer_grid import LayerGrid
 
 __all__ = [
-    "LayerCNN",
-    "GridCNN",
+    "LayerGrid",
     "FlatMLP",
     "build_backbone",
 ]
 
 # Backbones needing field_shape up front (shape-dependent first/last layer).
-# GridCNN isn't here: its AdaptiveAvgPool2d(1) makes every layer's shape
-# independent of (L, M).
-_NEEDS_FIELD_SHAPE = ("flat_mlp", "layer_cnn")
+_NEEDS_FIELD_SHAPE = ("flat_mlp", "layer_grid")
 
 
 def build_backbone(cfg, field_shape: tuple[int, int] | None = None, in_ch: int | None = None):
@@ -30,17 +26,15 @@ def build_backbone(cfg, field_shape: tuple[int, int] | None = None, in_ch: int |
             "-- see build_model's own field_shape argument."
         )
 
-    if name == "layer_cnn":
-        n_rows, n_segments = field_shape
-        return LayerCNN(
-            n_rows=n_rows, n_segments=n_segments,
-            embed_dim=cfg.model.embed_dim, dropout=cfg.model.dropout, in_ch=in_ch,
-        )
-    if name == "grid_cnn":
-        return GridCNN(embed_dim=cfg.model.embed_dim, dropout=cfg.model.dropout, in_ch=in_ch)
     if name == "flat_mlp":
         n_rows, n_segments = field_shape
         return FlatMLP(
+            n_rows=n_rows, n_segments=n_segments,
+            embed_dim=cfg.model.embed_dim, dropout=cfg.model.dropout, in_ch=in_ch,
+        )
+    if name == "layer_grid":
+        n_rows, n_segments = field_shape
+        return LayerGrid(
             n_rows=n_rows, n_segments=n_segments,
             embed_dim=cfg.model.embed_dim, dropout=cfg.model.dropout, in_ch=in_ch,
         )

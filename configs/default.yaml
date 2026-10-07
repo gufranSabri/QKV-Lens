@@ -25,7 +25,7 @@ labeling:
   bleurt_checkpoint: models/BLEURT-20-D12
 
 model:
-  backbone: layer_cnn # layer_cnn (MAIN) | flat_mlp | grid_cnn | layer_attn | layer_mha | layer_vit
+  backbone: layer_grid # layer_grid (MAIN) | flat_mlp
   embed_dim: 2048 # E: backbone output per token
   conv1d_layers: 2
   lstm_hidden: 2048

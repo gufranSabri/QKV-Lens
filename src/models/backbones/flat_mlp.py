@@ -1,5 +1,5 @@
 # Structure-preservation ablation baseline: no spatial stage at all, just
-# flatten -> dropout -> Linear. Shares LayerCNN's tail exactly.
+# flatten -> dropout -> Linear. Shares LayerGrid's tail exactly.
 
 from __future__ import annotations
 

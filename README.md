@@ -35,7 +35,7 @@ detector.py          detector-stage CLI (extract / train / test / cam / ...)
 detector.slurm       batch job for that pipeline
 src/extract/         generation, Q/K/V capture, feature-field construction
 src/models/          the detector: backbone -> Conv1d -> BiLSTM -> head
-src/models/backbones/  layer_cnn (main) | flat_mlp | grid_cnn
+src/models/backbones/  layer_grid (main) | flat_mlp
 src/data/            field dataset, normalisation, QKV-Lens corpus reader
 src/cam.py           Integrated Gradients attribution over the field
 configs/             one config per (dataset, LLM)
@@ -60,11 +60,13 @@ different widths (`D_q` vs `D_kv`); each is mean-pooled to the same `M`
 independently, so all three land on one channel axis.
 
 The detector's backbone turns each token's `(L, M, 3)` field into one
-embedding (`model.backbone`, default `layer_cnn`: a small Conv2d stage that
-mixes across the LAYER axis only, M untouched, before a flatten + dropout +
-one Linear tail. `flat_mlp` (no spatial structure) and `grid_cnn` (mixes L
-and M jointly) are the structure-preservation ablation's two comparison
-arms). Either way, the
+embedding (`model.backbone`, default `layer_grid`: FlatMLP's flatten +
+dropout + Linear path, plus a learned per-cell gate on a small Conv2d
+residual that mixes across the LAYER axis only (M untouched). The gate
+starts near zero, so the backbone collapses to `flat_mlp` at
+initialisation and only opens where the local conv correction actually
+helps. `flat_mlp` (no spatial structure) is the structure-preservation
+ablation's comparison arm). Either way, the
 per-token embeddings then go through Conv1d + BiLSTM + masked attention
 pooling over the token axis, then a binary head -- see `src/models/`.
 

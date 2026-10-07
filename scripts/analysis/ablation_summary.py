@@ -41,11 +41,11 @@ def _pct(x, default="-"):
         return default
 
 
-def section_layer_cnn_grid(lines: list[str]) -> None:
-    lines.append("## 1. LayerCNN grid search: KERNEL_SIZE / CONV_OUT_CHANNELS (llama3.1_8b, TriviaQA)")
-    rows = _read_csv(TABLES / "layer_cnn_grid.csv")
+def section_layer_grid_grid(lines: list[str]) -> None:
+    lines.append("## 1. LayerGrid grid search: KERNEL_SIZE / HIDDEN (llama3.1_8b, TriviaQA)")
+    rows = _read_csv(TABLES / "layer_grid_grid.csv")
     if rows is None:
-        lines.append("\n_Not yet run._ See `scripts/experiments/layer_cnn_grid.sh`.\n")
+        lines.append("\n_Not yet run._ See `scripts/experiments/layer_grid_grid.sh`.\n")
         return
 
     valid = [r for r in rows if r["auroc"]]
@@ -55,20 +55,20 @@ def section_layer_cnn_grid(lines: list[str]) -> None:
     best = max(valid, key=lambda r: float(r["auroc"]))
     lines.append("")
     lines.append(
-        f"Best cell: **KERNEL_SIZE=STRIDE={best['kernel_size']}, "
-        f"CONV_OUT_CHANNELS={best['conv_out_channels']}** -- AUROC {_pct(best['auroc'])}. "
-        "`layer_cnn.py` is left set to this combo by the sweep script, so "
-        "every `model.backbone=layer_cnn` run below (this repo's MAIN "
+        f"Best cell: **KERNEL_SIZE={best['kernel_size']}, "
+        f"HIDDEN={best['hidden']}** -- AUROC {_pct(best['auroc'])}. "
+        "`layer_grid.py` is left set to this combo by the sweep script, so "
+        "every `model.backbone=layer_grid` run below (this repo's MAIN "
         "backbone -- representation/pooling/collapse ablations, structure "
         "analysis, main results) already trains against it."
     )
     lines.append("")
-    lines.append("| KERNEL_SIZE (=STRIDE) | CONV_OUT_CHANNELS | AUROC |")
+    lines.append("| KERNEL_SIZE | HIDDEN | AUROC |")
     lines.append("|---|---|---|")
     for r in sorted(valid, key=lambda r: -float(r["auroc"])):
-        lines.append(f"| {r['kernel_size']} | {r['conv_out_channels']} | {_pct(r['auroc'])} |")
+        lines.append(f"| {r['kernel_size']} | {r['hidden']} | {_pct(r['auroc'])} |")
     lines.append("")
-    lines.append("Full table: `docs/tables/layer_cnn_grid.md`.")
+    lines.append("Full table: `docs/tables/layer_grid_grid.md`.")
     lines.append("")
 
 
@@ -186,8 +186,7 @@ def section_structure(lines: list[str]) -> None:
     lines.append("| Arm | AUROC | $\\Delta$ vs flat_mlp |")
     lines.append("|---|---|---|")
     for arm, label in (("flat", "flat_mlp (no spatial structure)"),
-                       ("layer", "layer_cnn (MAIN backbone, mixes L only)"),
-                       ("grid", "grid_cnn (mixes L and M jointly)"),
+                       ("gridbb", "layer_grid (MAIN backbone, gated local conv over L)"),
                        ("permL42", "flat_mlp + layer permutation")):
         r = by_arm.get(arm)
         if r is None:
@@ -197,21 +196,14 @@ def section_structure(lines: list[str]) -> None:
     lines.append("")
 
     flat_r = by_arm.get("flat")
-    layer_r, grid_r, perm_r = by_arm.get("layer"), by_arm.get("grid"), by_arm.get("permL42")
-    if flat_r and flat_r["auroc"] and layer_r and layer_r["auroc"]:
-        flat_auroc, layer_auroc = float(flat_r["auroc"]), float(layer_r["auroc"])
-        verdict = "layer_cnn beats flat_mlp" if layer_auroc > flat_auroc else "flat_mlp holds or beats layer_cnn"
+    main_r = by_arm.get("gridbb")
+    perm_r = by_arm.get("permL42")
+    if flat_r and flat_r["auroc"] and main_r and main_r["auroc"]:
+        flat_auroc, main_auroc = float(flat_r["auroc"]), float(main_r["auroc"])
+        verdict = "layer_grid beats flat_mlp" if main_auroc > flat_auroc else "flat_mlp holds or beats layer_grid"
         lines.append(
-            f"- **Spatial structure:** {verdict} "
-            f"(layer_cnn {_pct(layer_auroc)} vs flat_mlp {_pct(flat_auroc)})."
-        )
-    if layer_r and layer_r["auroc"] and grid_r and grid_r["auroc"]:
-        layer_auroc, grid_auroc = float(layer_r["auroc"]), float(grid_r["auroc"])
-        verdict = ("L-only mixing beats joint L+M mixing" if layer_auroc > grid_auroc
-                   else "joint L+M mixing holds or beats L-only mixing")
-        lines.append(
-            f"- **Which axes to mix:** {verdict} "
-            f"(layer_cnn {_pct(layer_auroc)} vs grid_cnn {_pct(grid_auroc)})."
+            f"- **Spatial structure (gated):** {verdict} "
+            f"(layer_grid {_pct(main_auroc)} vs flat_mlp {_pct(flat_auroc)})."
         )
     if flat_r and flat_r["auroc"] and perm_r and perm_r["auroc"]:
         flat_auroc, perm_auroc = float(flat_r["auroc"]), float(perm_r["auroc"])
@@ -368,8 +360,8 @@ def section_attribution(lines: list[str]) -> None:
         "Where the detector looks across a generated response, per model "
         "(rows) and relative position in the response (columns): "
         "`docs/figures/f1a_cam_response_heatmap.png`. Works for any backbone "
-        "(layer_cnn, flat_mlp, grid_cnn) -- see `src/cam.py`'s docstring for "
-        "why Integrated Gradients needs no backbone-specific hooking."
+        "(layer_grid, flat_mlp) -- see `src/cam.py`'s docstring for why "
+        "Integrated Gradients needs no backbone-specific hooking."
     )
     lines.append("")
 
@@ -408,7 +400,7 @@ def main() -> None:
         "Headline numbers from every ablation/analysis sweep "
         "(`scripts/experiments/all_experiments.sh`), in one place. Each "
         "section links to its own full table/figure for the complete "
-        "picture. `layer_cnn` is this repo's MAIN backbone (see step 1); "
+        "picture. `layer_grid` is this repo's MAIN backbone (see step 1); "
         "step 5 picks the winning representation and runs the actual main "
         "results, so by the time this report is read, "
         "`runs/{model}_{dataset}/` already reflects everything above it.",
@@ -416,7 +408,7 @@ def main() -> None:
     ]
 
     for fn in (
-        section_layer_cnn_grid,
+        section_layer_grid_grid,
         section_representation,
         section_pooling,
         section_collapse,
