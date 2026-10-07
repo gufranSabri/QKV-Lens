@@ -82,6 +82,19 @@ def test(
             ckpt_collapse, cfg.model.collapse_axis, ckpt_collapse,
         )
 
+    ckpt_model_cfg = (ckpt.get("config") or {}).get("model", {})
+    for switch in ("layer_grid_use_gate", "layer_grid_use_conv", "layer_grid_use_skip"):
+        ckpt_val = ckpt_model_cfg.get(switch, True)
+        cfg_val = getattr(cfg.model, switch)
+        if ckpt_val != cfg_val:
+            logger.warning(
+                "%s mismatch: checkpoint was trained with %r, this eval "
+                "config has %r. Pass --set model.%s=%r to match the "
+                "checkpoint, or load_state_dict will fail loudly on a "
+                "missing/unexpected parameter.",
+                switch, ckpt_val, cfg_val, switch, ckpt_val,
+            )
+
     name = dataset_name or cfg.dataset.name
     name, eval_set = _resolve_eval_target(name, ckpt, cfg.llm.alias)
 

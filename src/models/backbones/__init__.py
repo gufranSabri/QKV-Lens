@@ -37,5 +37,8 @@ def build_backbone(cfg, field_shape: tuple[int, int] | None = None, in_ch: int |
         return LayerGrid(
             n_rows=n_rows, n_segments=n_segments,
             embed_dim=cfg.model.embed_dim, dropout=cfg.model.dropout, in_ch=in_ch,
+            use_gate=cfg.model.layer_grid_use_gate,
+            use_conv=cfg.model.layer_grid_use_conv,
+            use_skip=cfg.model.layer_grid_use_skip,
         )
     raise ValueError(f"unknown backbone {name!r}")

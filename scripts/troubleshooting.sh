@@ -22,7 +22,6 @@ export HF_HUB_DISABLE_XET=1
 export TF_CPP_MIN_LOG_LEVEL=3
 export HF_HOME=/home/ahmedubc/scratch/hf_cache
 
-bash scripts/install.sh              # core deps only (exact_match labels)
 bash scripts/install.sh --bleurt     # ...or with BLEURT (HalluShift comparison)
 
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), '|', torch.cuda.get_device_name())"

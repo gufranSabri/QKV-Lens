@@ -31,6 +31,10 @@ model:
   lstm_hidden: 2048
   lstm_layers: 1
   dropout: 0.3
+  # LayerGrid component truth table: use_gate only matters when use_conv=true.
+  layer_grid_use_gate: true
+  layer_grid_use_conv: true
+  layer_grid_use_skip: true
 
 train:
   batch_size: 8

@@ -100,6 +100,14 @@ class ModelConfig:
     # averaging, at data-loading time. One of "M", "L", "channels". null
     # collapses nothing. Mutually exclusive with layer_permute_seed.
     collapse_axis: str | None = None
+    # LayerGrid component ablation: three independent on/off switches for a
+    # factorial truth table over its added parts. Only meaningful when
+    # backbone == "layer_grid". use_gate only matters when use_conv=True (it
+    # modulates the conv branch). use_conv=False, use_skip=False reduces
+    # exactly to FlatMLP.
+    layer_grid_use_gate: bool = True
+    layer_grid_use_conv: bool = True
+    layer_grid_use_skip: bool = True
 
 
 @dataclass
@@ -222,6 +230,20 @@ class Config:
                 "model.collapse_axis='channels' and model.keep_channels are "
                 "mutually exclusive: averaging Q/K/V into one channel leaves "
                 "nothing for a per-projection keep-list to select."
+            )
+        layer_grid_switches = (m.layer_grid_use_gate, m.layer_grid_use_conv, m.layer_grid_use_skip)
+        if layer_grid_switches != (True, True, True) and m.backbone != "layer_grid":
+            raise ValueError(
+                "model.layer_grid_use_{gate,conv,skip} only apply to "
+                "backbone='layer_grid'"
+            )
+        if m.layer_grid_use_gate and not m.layer_grid_use_conv:
+            raise ValueError(
+                "model.layer_grid_use_gate=true requires "
+                "model.layer_grid_use_conv=true: the gate modulates the conv "
+                "branch, so it has no effect once the conv branch is removed. "
+                "Set layer_grid_use_gate=false too (both give the same model "
+                "when use_conv=false)."
             )
 
         if la.scheme not in VALID_SCHEMES:
