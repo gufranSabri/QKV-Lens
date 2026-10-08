@@ -25,13 +25,32 @@ labeling:
   bleurt_checkpoint: models/BLEURT-20-D12
 
 model:
-  backbone: layer_grid # layer_grid (MAIN) | flat_mlp
+  backbone: layer_grid # layer_grid (MAIN) | flat_mlp -- winner: structure_analysis.csv (gridbb > flat, permL42)
   embed_dim: 2048 # E: backbone output per token
   conv1d_layers: 2
   lstm_hidden: 2048
   lstm_layers: 1
   dropout: 0.3
-  # LayerGrid component truth table: use_gate only matters when use_conv=true.
+  # Which of the field's 3 fixed channels (Q, K, V) reach the detector.
+  # [Q, K] won representation_ablation.csv on every model tested. null
+  # keeps all three; set to null to reproduce the QKV-Lens Table 4 baseline.
+  keep_channels: [Q, K]
+  # Compress the TOKEN axis to this many buckets by mean-pooling contiguous
+  # runs, applied after extract.max_tokens cropping. null (default) keeps
+  # every token -- see scripts/experiments/token_compression_ablation.sh.
+  token_buckets: null
+  # Structure-preservation control: permute the LAYER axis with a fixed
+  # seeded permutation, applied to every example. null (default) keeps true
+  # order -- only used by structure_analysis.sh's permL42 arm.
+  layer_permute_seed: null
+  # Feature-pooling ablation: collapse one field axis (M, L, or channels) to
+  # size 1 by averaging. null (default) collapses nothing -- the full field
+  # won collapse_axis_ablation.csv by 1.5-5.5 AUROC points over every
+  # collapsed arm. Mutually exclusive with layer_permute_seed.
+  collapse_axis: null
+  # LayerGrid component truth table: full (all 3 "on") won
+  # layer_grid_component_ablation.csv. use_gate only matters when
+  # use_conv=true -- it modulates the conv branch.
   layer_grid_use_gate: true
   layer_grid_use_conv: true
   layer_grid_use_skip: true

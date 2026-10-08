@@ -87,9 +87,12 @@ class ModelConfig:
     lstm_layers: int = 1
     dropout: float = 0.3
     # Which of the field's 3 fixed channels (Q, K, V) reach the detector.
-    # null (default) keeps all three; the field on disk is unchanged either
-    # way, this only zeroes channels at data-loading time.
-    keep_channels: list[str] | None = None
+    # [Q, K] won scripts/experiments/representation_ablation.sh on every
+    # model tested (llama3.1_8b, opt_6.7b, qwen2.5_7b) -- see
+    # docs/tables/representation_ablation.csv. null keeps all three; the
+    # field on disk is unchanged either way, this only zeroes channels at
+    # data-loading time.
+    keep_channels: list[str] | None = field(default_factory=lambda: ["Q", "K"])
     # Compress the TOKEN axis to this many buckets by mean-pooling contiguous
     # runs, applied after extract.max_tokens cropping. null keeps every token.
     token_buckets: int | None = None
