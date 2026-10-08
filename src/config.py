@@ -86,12 +86,7 @@ class ModelConfig:
     lstm_hidden: int = 2048
     lstm_layers: int = 1
     dropout: float = 0.3
-    # Which of the field's 3 fixed channels (Q, K, V) reach the detector.
-    # [Q, K] won scripts/experiments/representation_ablation.sh on every
-    # model tested (llama3.1_8b, opt_6.7b, qwen2.5_7b) -- see
-    # docs/tables/representation_ablation.csv. null keeps all three; the
-    # field on disk is unchanged either way, this only zeroes channels at
-    # data-loading time.
+    # [Q, K] won representation_ablation.csv; null keeps all 3 channels.
     keep_channels: list[str] | None = field(default_factory=lambda: ["Q", "K"])
     # Compress the TOKEN axis to this many buckets by mean-pooling contiguous
     # runs, applied after extract.max_tokens cropping. null keeps every token.
@@ -103,11 +98,7 @@ class ModelConfig:
     # averaging, at data-loading time. One of "M", "L", "channels". null
     # collapses nothing. Mutually exclusive with layer_permute_seed.
     collapse_axis: str | None = None
-    # LayerGrid component ablation: three independent on/off switches for a
-    # factorial truth table over its added parts. Only meaningful when
-    # backbone == "layer_grid". use_gate only matters when use_conv=True (it
-    # modulates the conv branch). use_conv=False, use_skip=False reduces
-    # exactly to FlatMLP.
+    # use_gate is moot when use_conv=False; only meaningful for backbone="layer_grid".
     layer_grid_use_gate: bool = True
     layer_grid_use_conv: bool = True
     layer_grid_use_skip: bool = True

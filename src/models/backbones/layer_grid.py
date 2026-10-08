@@ -7,12 +7,7 @@
 # w_x independently scales the raw-x contribution into the tail. Strict
 # superset of FlatMLP's solution space.
 #
-# Component ablation: three independent on/off switches, use_conv, use_gate,
-# use_skip, for a factorial truth table. use_gate only matters when
-# use_conv=True (the gate modulates the conv branch; with no conv branch
-# there's nothing to gate, so use_conv=False collapses gate=True/False onto
-# the same model). use_conv=False, use_skip=False reduces exactly to
-# FlatMLP.
+# use_gate/use_conv/use_skip ablate the three parts independently; use_gate is moot when use_conv=False.
 
 from __future__ import annotations
 

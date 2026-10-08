@@ -206,10 +206,8 @@ def _set_stats(dataset, stats) -> None:
 
 def compute_stats(dataset, indices: list[int], max_examples: int = 500) -> dict:
     # Per-channel mean/std over a sample of the TRAINING split only (val/test
-    # here would leak into the model's input scaling). Computed over
-    # _load_raw's on-disk channels -- collapse_axis="channels" averages
-    # channels together in _finish, AFTER normalize(), so stats here must
-    # match normalize()'s own n_channels_on_disk, not dataset.n_channels.
+    # here would leak into the model's input scaling).
+    # _load_raw is pre-collapse, so stats must use n_channels_on_disk, not n_channels.
     n_channels = getattr(dataset, "n_channels_on_disk", N_CHANNELS)
     names = PROJECTIONS if n_channels == N_CHANNELS else HIDDEN_STATE_CHANNELS
 
