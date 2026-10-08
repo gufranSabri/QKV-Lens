@@ -71,15 +71,21 @@ def integrated_gradients(
 
     grad_sum = torch.zeros_like(images)
     prob = None
-    for alpha in alphas:
-        interpolated = (base + alpha * diff).clone().requires_grad_(True)
-        logit = model(interpolated, mask)  # (1,)
-        if prob is None:
-            with torch.no_grad():
-                prob = torch.sigmoid(model(images, mask)).item()
-        model.zero_grad(set_to_none=True)
-        logit.sum().backward()
-        grad_sum += interpolated.grad.detach()
+    # cudnn's RNN backward refuses to run against a module in eval mode
+    # (model.eval() in load_detector); IG needs gradients through an eval
+    # model, so cudnn's RNN kernel is disabled for this call -- the LSTM
+    # falls back to its (slower but backward-capable) non-cudnn path. Scoped
+    # to this loop only so training elsewhere keeps the fast cudnn kernel.
+    with torch.backends.cudnn.flags(enabled=False):
+        for alpha in alphas:
+            interpolated = (base + alpha * diff).clone().requires_grad_(True)
+            logit = model(interpolated, mask)  # (1,)
+            if prob is None:
+                with torch.no_grad():
+                    prob = torch.sigmoid(model(images, mask)).item()
+            model.zero_grad(set_to_none=True)
+            logit.sum().backward()
+            grad_sum += interpolated.grad.detach()
 
     avg_grad = grad_sum / n_steps
     attribution = diff * avg_grad  # (1, T, 3, L, M)
