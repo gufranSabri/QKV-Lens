@@ -273,7 +273,7 @@ def capture_all(
     # left_pad_batch when B > 1.
     #
     # capture_generate_outputs: also captures hidden_states/attentions/logits
-    # per decode step (for baselines other than QKV-Steer's own field, e.g.
+    # per decode step (for baselines other than QKV-Lens's own field, e.g.
     # hallushift's per-token features). Off by default since output_attentions
     # needs attn_implementation="eager" and a full (B, heads, seq, seq) tensor
     # per step. Requires B == 1 -- per-row slicing out of a padded batch isn't

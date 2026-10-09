@@ -21,9 +21,9 @@ OUT_FIG = REPO_ROOT / "docs" / "figures"
 OUT_TAB = REPO_ROOT / "docs" / "tables"
 
 DATASETS = ["coqa", "triviaqa", "truthfulqa"]
-MODELS = ["llama2_7b", "llama3.1_8b", "opt_6.7b", "qwen2.5_7b"]
+MODELS = ["llama3.1_8b", "opt_6.7b", "qwen2.5_7b"]
 PRETTY = {
-    "llama2_7b": "Llama-2-7B", "llama3.1_8b": "Llama-3.1-8B",
+    "llama3.1_8b": "Llama-3.1-8B",
     "opt_6.7b": "OPT-6.7B", "qwen2.5_7b": "Qwen2.5-7B",
 }
 

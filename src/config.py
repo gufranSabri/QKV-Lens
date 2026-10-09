@@ -94,6 +94,8 @@ class ModelConfig:
     # Structure-preservation control: permute the LAYER axis with a fixed
     # seeded permutation, applied to every example. null keeps true order.
     layer_permute_seed: int | None = None
+    # Same as layer_permute_seed but for the SEGMENT (M) axis; the two are independent and may combine.
+    segment_permute_seed: int | None = None
     # Feature-pooling ablation: collapse one field axis to size 1 by
     # averaging, at data-loading time. One of "M", "L", "channels". null
     # collapses nothing. Mutually exclusive with layer_permute_seed.
@@ -133,7 +135,7 @@ class Config:
     labeling: LabelingConfig = field(default_factory=LabelingConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
-    data_root: str = "/scratch/ahmedubc/QKV-Steer-data"
+    data_root: str = "/scratch/ahmedubc/QKV-Lens-data"
     runs_root: str = "runs"
 
     def example_dir(self, root: str | None = None) -> Path:
@@ -208,6 +210,8 @@ class Config:
             raise ValueError("model.token_buckets must be >= 1 or null")
         if m.layer_permute_seed is not None and m.layer_permute_seed < 0:
             raise ValueError("model.layer_permute_seed must be >= 0 or null")
+        if m.segment_permute_seed is not None and m.segment_permute_seed < 0:
+            raise ValueError("model.segment_permute_seed must be >= 0 or null")
         if m.collapse_axis is not None and m.collapse_axis not in VALID_COLLAPSE_AXES:
             raise ValueError(
                 f"model.collapse_axis must be one of {VALID_COLLAPSE_AXES} or null, "
@@ -218,6 +222,12 @@ class Config:
                 "model.collapse_axis='L' and model.layer_permute_seed are "
                 "mutually exclusive: collapsing the layer axis to size 1 "
                 "leaves nothing for a layer-order permutation to reorder."
+            )
+        if m.collapse_axis == "M" and m.segment_permute_seed is not None:
+            raise ValueError(
+                "model.collapse_axis='M' and model.segment_permute_seed are "
+                "mutually exclusive: collapsing the segment axis to size 1 "
+                "leaves nothing for a segment-order permutation to reorder."
             )
         if m.collapse_axis == "channels" and m.keep_channels is not None:
             raise ValueError(
@@ -282,40 +292,7 @@ _SECTIONS = {
     "train": TrainConfig,
 }
 
-# Keys that existed in QKV-Lens and are deliberately gone. Named explicitly
-# so a leftover config fails loudly instead of silently running under
-# settings the user believes are in effect.
-_REMOVED_KEYS: dict[str, str] = {
-    "extract.extraction_type": "delta/transform channels competed for the channel axis, which now holds Q/K/V",
-    "extract.views": "Q, K and V are always all three, as the field's channel axis",
-    "extract.boundary_mode": "only meaningful for the removed delta channels",
-    "extract.n_cols": "renamed to extract.n_segments (the paper's M)",
-    "model.channels": "each token is one 3-channel image; there is nothing to regroup",
-    "model.include": "there is only one image stream to keep",
-    "model.fusion": "a single stream never had anything to fuse (build_fusion always returned identity)",
-    "model.share_backbone": "there is only one backbone",
-    "model.fused_dim": "no fusion stage; the CNN's embed_dim feeds the temporal encoder directly",
-}
-
-
-def _check_removed(raw: dict) -> None:
-    found = []
-    for dotted, why in _REMOVED_KEYS.items():
-        section, key = dotted.split(".")
-        if isinstance(raw.get(section), dict) and key in raw[section]:
-            found.append(f"  {dotted}: {why}")
-    if found:
-        raise ValueError(
-            "config uses option(s) removed in QKV-Steer:\n"
-            + "\n".join(found)
-            + "\n\nThese were QKV-Lens ablation axes. See the top of src/config.py "
-              "for what is fixed and why."
-        )
-
-
 def _build(raw: dict) -> Config:
-    _check_removed(raw)
-
     kwargs: dict[str, Any] = {}
     for name, cls in _SECTIONS.items():
         section = raw.get(name) or {}

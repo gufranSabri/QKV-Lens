@@ -9,7 +9,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from src.data import legacy
 from src.extract.tensor_ops import PROJECTIONS
 from src.utils.logger import get_logger
 
@@ -33,13 +32,16 @@ class QKVFieldDataset(Dataset):
         keep_channels: list[str] | None = None,
         token_buckets: int | None = None,
         layer_permute_seed: int | None = None,
+        segment_permute_seed: int | None = None,
         collapse_axis: str | None = None,
     ):
         self.keep_channels = keep_channels
         self.token_buckets = token_buckets
         self.layer_permute_seed = layer_permute_seed
+        self.segment_permute_seed = segment_permute_seed
         self.collapse_axis = collapse_axis
         self._layer_perm: torch.Tensor | None = None
+        self._segment_perm: torch.Tensor | None = None
         self.root = Path(root)
         manifest = self.root / "manifest.jsonl"
         if not manifest.exists():
@@ -85,13 +87,6 @@ class QKVFieldDataset(Dataset):
             )
             self.records = [r for r in self.records if r.get("n_tokens", 0) > 0]
 
-        # A QKV-Lens-era corpus is converted on read rather than re-extracted;
-        # validated once here so an incompatible corpus fails before training.
-        self.legacy = legacy.is_legacy_geometry(self.geometry)
-        if self.legacy:
-            legacy.assert_compatible(self.geometry, self.root)
-            logger.info("%s: %s", self.root, legacy.describe(self.geometry))
-
         self.stats = stats
         self.max_tokens = max_tokens
         self.origin = origin or f"{self.root.parent.name}_{self.root.name}"
@@ -109,10 +104,7 @@ class QKVFieldDataset(Dataset):
         path = self.root / rec["dir"] / "tokens.npy"
 
         arr = np.load(path)
-        if self.legacy:
-            field = legacy.to_field(arr)          # (T, V, L, M, C) -> (T, L, M, 3)
-        else:
-            field = torch.from_numpy(np.ascontiguousarray(arr)).float()
+        field = torch.from_numpy(np.ascontiguousarray(arr)).float()
 
         if self.max_tokens is not None and field.shape[0] > self.max_tokens:
             field = field[: self.max_tokens]
@@ -123,7 +115,7 @@ class QKVFieldDataset(Dataset):
         return field
 
     def _finish(self, raw: torch.Tensor) -> torch.Tensor:
-        # normalise -> zero unwanted channels -> collapse an axis -> permute layers -> conv position
+        # normalise -> zero unwanted channels -> collapse an axis -> permute layers/segments -> conv position
         field = raw
         if self.stats is not None:
             field = normalize(field, self.stats, n_channels=self.n_channels_on_disk)
@@ -143,6 +135,9 @@ class QKVFieldDataset(Dataset):
         if self.layer_permute_seed is not None:
             field = self._permuted_layers(field)
 
+        if self.segment_permute_seed is not None:
+            field = self._permuted_segments(field)
+
         return field.permute(0, 3, 1, 2).contiguous()   # (T, L, M, C) -> (T, C, L, M)
 
     def _permuted_layers(self, field: torch.Tensor) -> torch.Tensor:
@@ -153,6 +148,14 @@ class QKVFieldDataset(Dataset):
             gen = torch.Generator().manual_seed(self.layer_permute_seed)
             self._layer_perm = torch.randperm(n_layers, generator=gen)
         return field[:, self._layer_perm]
+
+    def _permuted_segments(self, field: torch.Tensor) -> torch.Tensor:
+        # Mirrors _permuted_layers but shuffles the SEGMENT (M) axis instead.
+        n_segments = field.shape[2]
+        if self._segment_perm is None or self._segment_perm.shape[0] != n_segments:
+            gen = torch.Generator().manual_seed(self.segment_permute_seed)
+            self._segment_perm = torch.randperm(n_segments, generator=gen)
+        return field[:, :, self._segment_perm]
 
     def __getitem__(self, i):
         rec = self.records[i]

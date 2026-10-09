@@ -80,9 +80,9 @@ def main(argv=None) -> int:
     p_ex.add_argument("--overwrite", action="store_true",
                       help="re-extract examples that already have tokens.npy")
     p_ex.add_argument(
-        "--methods", default="qkv-steer",
+        "--methods", default="qkv-lens",
         help="comma-separated: which scripts/reproducing_baselines/ pipeline(s) to also "
-             "feed from this SAME generation (default: qkv-steer only). "
+             "feed from this SAME generation (default: qkv-lens only). "
              "'hallushift' adds hidden_states/attentions capture and forces "
              "batch_size=1 + eager attention for the whole run. 'haloscope' is "
              "accepted but NOT extracted here -- see scripts/reproducing_baselines/"

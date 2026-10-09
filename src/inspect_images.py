@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 
 from src.config import Config
-from src.data import legacy
 from src.extract.run_extraction import parse_meta
 from src.extract.tensor_ops import PROJECTIONS
 from src.utils.logger import get_logger
@@ -19,10 +18,7 @@ logger = get_logger(__name__)
 
 
 def inspect(cfg: Config, idx: int = 0, n_tokens: int = 4, out: str | None = None) -> None:
-    root = legacy.resolve_root(
-        cfg.example_dir(), Path(cfg.data_root), cfg.dataset.name, cfg.llm.alias,
-        is_default_pool=cfg.extract.pool == "mean",
-    )
+    root = cfg.example_dir()
     ex_dir = root / f"{idx:05d}"
     tokens_path = ex_dir / "tokens.npy"
     if not tokens_path.exists():
@@ -32,12 +28,7 @@ def inspect(cfg: Config, idx: int = 0, n_tokens: int = 4, out: str | None = None
     geometry = json.loads(geometry_path.read_text()) if geometry_path.exists() else {}
 
     arr = np.load(tokens_path)
-    if legacy.is_legacy_geometry(geometry):
-        legacy.assert_compatible(geometry, root)
-        logger.info("%s", legacy.describe(geometry))
-        field = legacy.to_field(arr).numpy()
-    else:
-        field = arr.astype(np.float32)                # (T, L, M, 3)
+    field = arr.astype(np.float32)                # (T, L, M, 3)
     meta = parse_meta(ex_dir / "meta.txt")
 
     print(f"\nexample {idx}  ({ex_dir})")

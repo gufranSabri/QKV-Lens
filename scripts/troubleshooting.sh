@@ -1,5 +1,5 @@
 #!/bin/bash
-# QKV-Steer: interactive pipeline. Run command-by-command in an interactive
+# QKV-Lens: interactive pipeline. Run command-by-command in an interactive
 # SLURM terminal -- not meant to be executed as a whole.
 
 # ── STEP 0: ALLOCATE (run ONE of these) ────────────────────────────────────

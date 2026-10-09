@@ -88,7 +88,7 @@ def fmt_num(x: float | None, digits=1) -> str:
 
 def build_report(rows: list[dict]) -> str:
     lines = []
-    lines.append("# QKV-Steer migrated corpus stats\n")
+    lines.append("# QKV-Lens migrated corpus stats\n")
     lines.append(
         "Computed from `manifest.jsonl` under the migrated "
         "`{data_root}/{dataset}/{llm_alias}/` tree. Pairs whose BLEURT "

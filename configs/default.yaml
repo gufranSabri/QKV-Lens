@@ -1,4 +1,4 @@
-# QKV-Steer defaults. Fixed-in-code settings (field layout, mean pooling,
+# QKV-Lens defaults. Fixed-in-code settings (field layout, mean pooling,
 # greedy decoding) are not keys here -- see the top of src/config.py.
 
 llm:
@@ -34,6 +34,7 @@ model:
   keep_channels: [Q, K] # null keeps all 3; [Q,K] won representation_ablation.csv
   token_buckets: null # null keeps every token
   layer_permute_seed: null # null keeps true layer order
+  segment_permute_seed: null # null keeps true segment (M) order
   collapse_axis: null # M | L | channels; null collapses nothing (won collapse_axis_ablation.csv)
   layer_grid_use_gate: true # moot when use_conv=false
   layer_grid_use_conv: true
@@ -54,10 +55,8 @@ train:
   test_fraction: 0.25
   balance_classes: true
 
-# Set this to a QKV-Steer-specific path -- do NOT point it at the QKV-Lens
-# corpus: the on-disk field layout changed to (T, L, M, 3).
-# data_root: /home/ahmedubc/scratch/QKV-Steer-data
-# runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer
+# data_root: /home/ahmedubc/scratch/QKV-Lens-data
+# runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Lens
 
-data_root: /scratch/ahmedubc/QKV-Steer-data
-runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Steer/runs
+data_root: /scratch/ahmedubc/QKV-Lens-data
+runs_root: /home/ahmedubc/projects/aip-lsigal/ahmedubc/QKV-Lens/runs

@@ -1,5 +1,5 @@
 #!/bin/bash
-# QKV-Steer dependency install -- the single source of truth, there is no
+# QKV-Lens dependency install -- the single source of truth, there is no
 # requirements.txt. Every SLURM script and troubleshooting.sh sources this.
 # Assumes the venv is already created and activated.
 #

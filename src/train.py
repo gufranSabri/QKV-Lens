@@ -12,7 +12,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 
 from src.config import Config
-from src.data import legacy
 from src.data.dataset import (
     N_CHANNELS,
     QKVFieldDataset,
@@ -36,9 +35,8 @@ def load_source(
 ) -> QKVFieldDataset:
     # field_source: "qkv" (default, canonical/ablation-cell tree) or
     # "hidden-states" (the representation ablation's alternative field).
-    # The hidden-states tree is never a pooling-ablation cell or legacy
-    # corpus, so it's addressed directly rather than through
-    # dataset_dir_for/legacy.resolve_root.
+    # The hidden-states tree is never a pooling-ablation cell, so it's
+    # addressed directly rather than through dataset_dir_for.
     data_root = Path(cfg.data_root)
 
     if field_source == "hidden-states":
@@ -47,11 +45,7 @@ def load_source(
         # dataset_name/llm_alias may differ from cfg's own (cross-LLM test()
         # evaluates a checkpoint's dataset against another LLM's corpus).
         # extract.pool still comes from cfg.
-        native = cfg.dataset_dir_for(dataset_name, llm_alias, root=str(data_root))
-        root = legacy.resolve_root(
-            native, data_root, dataset_name, llm_alias,
-            is_default_pool=cfg.extract.pool == "mean",
-        )
+        root = cfg.dataset_dir_for(dataset_name, llm_alias, root=str(data_root))
 
     return QKVFieldDataset(
         root,
@@ -60,6 +54,7 @@ def load_source(
         keep_channels=cfg.model.keep_channels,
         token_buckets=cfg.model.token_buckets,
         layer_permute_seed=cfg.model.layer_permute_seed,
+        segment_permute_seed=cfg.model.segment_permute_seed,
         collapse_axis=cfg.model.collapse_axis,
         **kw,
     )

@@ -1,4 +1,4 @@
-# QKV-Steer
+# QKV-Lens
 
 **From correlational attribution to causal intervention on pre-attention Q/K/V projections.**
 
@@ -132,7 +132,7 @@ regenerated: each baseline scores the greedy responses already in
 `{data_root}/{dataset}/{llm_alias}/*/meta.txt`, against the BLEURT labels
 already in `manifest.jsonl`, on the test indices already in
 `{runs_root}/{llm_alias}_{dataset}/split.json` -- the same partition
-`src/train.py` gave QKV-Steer and `scripts/run_training.py` gave HalluShift.
+`src/train.py` gave QKV-Lens and `scripts/run_training.py` gave HalluShift.
 That is what makes the AUROC column comparable down the whole table.
 
 Three stages, each resumable, under `scripts/baselines/`:

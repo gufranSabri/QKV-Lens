@@ -61,6 +61,15 @@ def test(
             ckpt_seed, cfg.model.layer_permute_seed, ckpt_seed,
         )
 
+    ckpt_seg_seed = (ckpt.get("config") or {}).get("model", {}).get("segment_permute_seed")
+    if ckpt_seg_seed != cfg.model.segment_permute_seed:
+        logger.warning(
+            "segment_permute_seed mismatch: checkpoint was trained with %r, "
+            "this eval config has %r. Pass --set model.segment_permute_seed=%r "
+            "to match the checkpoint, or this result is not a faithful eval of it.",
+            ckpt_seg_seed, cfg.model.segment_permute_seed, ckpt_seg_seed,
+        )
+
     # extract.source mismatch is not silent -- it fails loudly in
     # encode_tokens's channel check -- but warn before that exception.
     ckpt_source = (ckpt.get("config") or {}).get("extract", {}).get("source", "qkv")

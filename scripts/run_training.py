@@ -2,12 +2,12 @@
 """Train + evaluate one or more baselines on already-extracted features.
 
     python run_training.py --config configs/coqa/llama2_7b.yaml
-    python run_training.py --config configs/coqa/llama2_7b.yaml --methods qkv-steer,hallushift
+    python run_training.py --config configs/coqa/llama2_7b.yaml --methods qkv-lens,hallushift
     python run_training.py --config configs/coqa/llama2_7b.yaml --methods hallushift
 
 Each method trains on its own already-extracted features with its own
-training code; this script only dispatches. qkv-steer always trains first
-when both are requested -- hallushift's split reuse needs QKV-Steer's
+training code; this script only dispatches. qkv-lens always trains first
+when both are requested -- hallushift's split reuse needs QKV-Lens's
 split.json, written as a side effect of training it.
 """
 
@@ -29,19 +29,19 @@ from src.utils.logger import get_logger, setup_logging  # noqa: E402
 
 logger = get_logger(__name__)
 
-KNOWN_METHODS = ("qkv-steer", "hallushift", "haloscope")
+KNOWN_METHODS = ("qkv-lens", "hallushift", "haloscope")
 
 
-def qkv_steer_run_dir(cfg, dataset_name: str) -> Path:
+def qkv_lens_run_dir(cfg, dataset_name: str) -> Path:
     # Matches all-datasets_run.sh's naming ({llm_alias}_{dataset}), NOT
     # src/train.default_run_name's {llm_alias}_{dataset}_{backbone}.
     return Path(cfg.runs_root) / f"{cfg.llm.alias}_{dataset_name}"
 
 
-def train_qkv_steer(cfg, dataset_name: str) -> dict:
+def train_qkv_lens(cfg, dataset_name: str) -> dict:
     from src.train import train
 
-    logger.info("=== training qkv-steer: %s / %s ===", cfg.llm.alias, dataset_name)
+    logger.info("=== training qkv-lens: %s / %s ===", cfg.llm.alias, dataset_name)
     run_name = f"{cfg.llm.alias}_{dataset_name}"
     return train(cfg, dataset_name, run_name=run_name)
 
@@ -62,8 +62,8 @@ def load_manifest_labels(manifest_path: Path) -> dict[int, int]:
     return labels
 
 
-def load_qkv_steer_split(split_json_path: Path, manifest_path: Path) -> tuple[list[int], list[int]]:
-    # split.json's train/test lists are positions into QKV-Steer's FILTERED
+def load_qkv_lens_split(split_json_path: Path, manifest_path: Path) -> tuple[list[int], list[int]]:
+    # split.json's train/test lists are positions into QKV-Lens's FILTERED
     # (n_tokens>0) example list; maps those back to manifest idx so
     # build_hallushift_dataframe's row order (== manifest idx order,
     # unfiltered) can be indexed the same way.
@@ -94,7 +94,7 @@ def load_qkv_steer_split(split_json_path: Path, manifest_path: Path) -> tuple[li
 
 
 def build_hallushift_dataframe(rows_path: Path, manifest_path: Path):
-    # Row i == manifest idx i -- load_qkv_steer_split's position mapping assumes this.
+    # Row i == manifest idx i -- load_qkv_lens_split's position mapping assumes this.
     import pandas as pd
 
     sys.path.insert(0, str(SCRIPTS_DIR / "reproducing_baselines" / "hallushift"))
@@ -152,10 +152,10 @@ def train_hallushift(cfg, dataset_name: str, qkv_run_dir: Path) -> dict:
     if not rows_path.exists():
         raise FileNotFoundError(
             f"no hallushift rows at {rows_path} -- run "
-            f"`detector.py extract --methods qkv-steer,hallushift` first"
+            f"`detector.py extract --methods qkv-lens,hallushift` first"
         )
     if not manifest_path.exists():
-        raise FileNotFoundError(f"no QKV-Steer manifest at {manifest_path}")
+        raise FileNotFoundError(f"no QKV-Lens manifest at {manifest_path}")
 
     logger.info("=== training hallushift: %s / %s ===", cfg.llm.alias, dataset_name)
 
@@ -167,19 +167,19 @@ def train_hallushift(cfg, dataset_name: str, qkv_run_dir: Path) -> dict:
     if split_json_path.exists():
         # common_idxs may be a strict subset of manifest idx, so map each
         # split.json idx to its position in common_idxs rather than assuming they coincide
-        full_train_rows, full_test_rows = load_qkv_steer_split(split_json_path, manifest_path)
+        full_train_rows, full_test_rows = load_qkv_lens_split(split_json_path, manifest_path)
         idx_to_row = {idx: row for row, idx in enumerate(common_idxs)}
         train_idx = [idx_to_row[i] for i in full_train_rows if i in idx_to_row]
         test_idx = [idx_to_row[i] for i in full_test_rows if i in idx_to_row]
         logger.info(
-            "reusing QKV-Steer split from %s: %d train / %d test rows",
+            "reusing QKV-Lens split from %s: %d train / %d test rows",
             split_json_path, len(train_idx), len(test_idx),
         )
     else:
         logger.warning(
             "no split.json at %s -- hallushift will use its OWN fresh "
-            "train_test_split, NOT the same partition QKV-Steer uses. Train "
-            "qkv-steer first (or include it in --methods) for a fair "
+            "train_test_split, NOT the same partition QKV-Lens uses. Train "
+            "qkv-lens first (or include it in --methods) for a fair "
             "comparison.",
             split_json_path,
         )
@@ -206,8 +206,8 @@ def main(argv=None) -> int:
     parser.add_argument("--config", required=True, help="path to a YAML config")
     parser.add_argument("--dataset", default=None, help="defaults to the config's dataset")
     parser.add_argument(
-        "--methods", default="qkv-steer",
-        help="comma-separated: which method(s) to train+eval (default: qkv-steer only)",
+        "--methods", default="qkv-lens",
+        help="comma-separated: which method(s) to train+eval (default: qkv-lens only)",
     )
     parser.add_argument(
         "--set", action="append", default=[], metavar="KEY=VAL",
@@ -242,12 +242,12 @@ def main(argv=None) -> int:
 
     cfg = load_config(args.config, overrides=overrides)
     dataset_name = args.dataset or cfg.dataset.name
-    qkv_run_dir = qkv_steer_run_dir(cfg, dataset_name)
+    qkv_run_dir = qkv_lens_run_dir(cfg, dataset_name)
 
     results: dict[str, dict] = {}
 
-    if "qkv-steer" in methods:
-        results["qkv-steer"] = train_qkv_steer(cfg, dataset_name)
+    if "qkv-lens" in methods:
+        results["qkv-lens"] = train_qkv_lens(cfg, dataset_name)
 
     if "hallushift" in methods:
         results["hallushift"] = train_hallushift(cfg, dataset_name, qkv_run_dir)

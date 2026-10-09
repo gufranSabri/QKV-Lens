@@ -15,9 +15,9 @@
 # manifest.jsonl alone, before load_examples() or load_llm() ever run.
 #
 # `methods` selects which scripts/reproducing_baselines/ pipeline(s) also get
-# fed from this SAME generation call (default: qkv-steer only) -- one greedy
+# fed from this SAME generation call (default: qkv-lens only) -- one greedy
 # decode, one truncation pass, one BLEURT pass shared, never computed twice.
-#   qkv-steer   Always on. The (T, L, M, 3) field above.
+#   qkv-lens   Always on. The (T, L, M, 3) field above.
 #   hallushift  Also captures hidden_states/attentions/logits per decode step
 #               and writes build_hallushift_row's output to
 #               {data_root}/hallushift/{dataset}/{llm_alias}/rows.jsonl.
@@ -58,8 +58,8 @@ DTYPES = {"float16": torch.float16, "float32": torch.float32, "bfloat16": torch.
 # "haloscope" is accepted by --methods but handled by its own separate script.
 # "hidden-states" is NOT here -- see run_hidden_states_extraction, its own
 # isolated path with no reason to share this resume/skip state machine.
-KNOWN_METHODS = ("qkv-steer", "hallushift", "haloscope")
-SHARED_GENERATION_METHODS = ("qkv-steer", "hallushift")
+KNOWN_METHODS = ("qkv-lens", "hallushift", "haloscope")
+SHARED_GENERATION_METHODS = ("qkv-lens", "hallushift")
 
 
 def load_llm(cfg: Config, require_eager_attention: bool = False):
@@ -293,7 +293,7 @@ def run_extraction(
     cfg: Config,
     chunk: int | None = None,
     overwrite: bool = False,
-    methods: tuple[str, ...] = ("qkv-steer",),
+    methods: tuple[str, ...] = ("qkv-lens",),
 ) -> None:
     unknown = set(methods) - set(KNOWN_METHODS)
     if unknown:
@@ -311,7 +311,7 @@ def run_extraction(
     # manifest from an interrupted run needs --overwrite to redo.
     #
     # Skipped when hallushift is requested: a manifest from a prior
-    # qkv-steer-only run proves nothing about hallushift rows existing.
+    # qkv-lens-only run proves nothing about hallushift rows existing.
     # Chunked runs share one manifest across chunks, so this can't tell
     # whether THIS chunk's range is done -- they use the index-set check below.
     if not overwrite and chunk is None and not want_hallushift:
@@ -382,7 +382,7 @@ def run_extraction(
         if n_missing_hs:
             logger.info(
                 "%d example(s) need (re)generation because their hallushift "
-                "row is missing (a prior qkv-steer-only extraction can't "
+                "row is missing (a prior qkv-lens-only extraction can't "
                 "supply it retroactively)",
                 n_missing_hs,
             )
@@ -396,7 +396,7 @@ def run_extraction(
         logger.info("model geometry: %s", geom)
 
         # Forced here (not left to config) so a run started with
-        # --methods qkv-steer,hallushift can't silently keep an unrelated
+        # --methods qkv-lens,hallushift can't silently keep an unrelated
         # batch_size and hit capture_all's ValueError deep into generation.
         batch_size = 1 if want_hallushift else cfg.extract.batch_size
         logger.info("extraction batch_size: %d%s", batch_size,
