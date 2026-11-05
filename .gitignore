@@ -53,3 +53,5 @@ slurm/
 scripts/exports/
 
 CLAUDE.md
+
+.claude/
