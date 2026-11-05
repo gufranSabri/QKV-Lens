@@ -69,7 +69,7 @@ def main(argv=None) -> int:
         "run_name", nargs="*", default=None,
         help="only analyze these runs/<run_name>(s) (default: every run under "
              "--runs-root) -- e.g. the 4 canonical {llm_alias}_triviaqa runs, "
-             "to skip the ablation run dirs (repr_*, collapse_*, struct_*, "
+             "to skip the ablation run dirs (repr_*, collapse_*, perm_*, "
              "...) that also live under --runs-root.",
     )
     p.add_argument("--runs-root", default="runs", help="default: runs")

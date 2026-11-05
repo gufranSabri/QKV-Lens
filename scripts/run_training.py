@@ -33,8 +33,7 @@ KNOWN_METHODS = ("qkv-lens", "hallushift", "haloscope")
 
 
 def qkv_lens_run_dir(cfg, dataset_name: str) -> Path:
-    # Matches all-datasets_run.sh's naming ({llm_alias}_{dataset}), NOT
-    # src/train.default_run_name's {llm_alias}_{dataset}_{backbone}.
+    # Matches all-datasets_run.sh's naming ({llm_alias}_{dataset}).
     return Path(cfg.runs_root) / f"{cfg.llm.alias}_{dataset_name}"
 
 

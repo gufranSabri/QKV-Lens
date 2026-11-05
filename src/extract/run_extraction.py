@@ -1,23 +1,26 @@
-# Orchestrates feature extraction: generate -> capture Q/K/V -> build field -> save.
+# Orchestrates feature extraction: generate -> capture Q/K/V (+ hidden states) -> build fields -> save.
 #
 # One `extract` run generates each example once (manual decode loop per
-# batch, see qkv_hooks.capture_all) and writes the paper's (T, L, M, 3) field:
+# batch, see qkv_hooks.capture_all) and writes every requested variant from
+# that same decode:
 #
 #     {data_root}/{dataset}/{llm_alias}/
-#         00000/tokens.npy   (T, L, M, 3) float16
-#         00000/meta.txt     prompt / response / gold / score / label
-#         manifest.jsonl     one JSON line per example (the training index)
-#         geometry.json      the model geometry the fields were built with
+#         judge_cache.jsonl  llm_judge labels, shared by every variant
 #         progress.log       "i/total" appended every 100 generated examples
+#         default/           QKV, mean pool, the model's default M
+#             00000/tokens.npy   (T, L, M, C) float16, C=3 (Q, K, V) or 1 (H)
+#             00000/meta.txt     prompt / response / gold / score / label
+#             manifest.jsonl     one JSON line per example (the training index)
+#             geometry.json      the model geometry the fields were built with
+#         qkv_M8/ hs/ hs_M16/ qkv_max/ ...   named by Config.variant_name
 #
-# Restartable: an already-complete example is skipped unless --overwrite.
-# When every requested example is already complete this is detected from
-# manifest.jsonl alone, before load_examples() or load_llm() ever run.
+# Restartable: an example already complete in every requested variant is
+# skipped unless --overwrite; one missing from any variant is regenerated and
+# written to all of them, so every variant of an example comes from one decode.
 #
 # `methods` selects which scripts/reproducing_baselines/ pipeline(s) also get
-# fed from this SAME generation call (default: qkv-lens only) -- one greedy
-# decode, one truncation pass, one BLEURT pass shared, never computed twice.
-#   qkv-lens   Always on. The (T, L, M, 3) field above.
+# fed from this SAME generation call (default: qkv-lens only).
+#   qkv-lens   Always on. The variant fields above.
 #   hallushift  Also captures hidden_states/attentions/logits per decode step
 #               and writes build_hallushift_row's output to
 #               {data_root}/hallushift/{dataset}/{llm_alias}/rows.jsonl.
@@ -29,6 +32,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -45,7 +49,6 @@ from src.extract.tensor_ops import (
     build_feature_field,
     build_hidden_states_field,
     pool_layer_axis,
-    stack_hidden_states,
 )
 from src.label.registry import label_examples
 from src.utils.logger import get_logger
@@ -56,8 +59,6 @@ logger = get_logger(__name__)
 DTYPES = {"float16": torch.float16, "float32": torch.float32, "bfloat16": torch.bfloat16}
 
 # "haloscope" is accepted by --methods but handled by its own separate script.
-# "hidden-states" is NOT here -- see run_hidden_states_extraction, its own
-# isolated path with no reason to share this resume/skip state machine.
 KNOWN_METHODS = ("qkv-lens", "hallushift", "haloscope")
 SHARED_GENERATION_METHODS = ("qkv-lens", "hallushift")
 
@@ -169,10 +170,6 @@ def hallushift_dir(cfg: Config) -> Path:
     return Path(cfg.data_root) / "hallushift" / cfg.dataset.name / cfg.llm.alias
 
 
-def hidden_states_dir(cfg: Config) -> Path:
-    return Path(cfg.data_root) / "hidden_states" / cfg.dataset.name / cfg.llm.alias
-
-
 def load_hallushift_rows(path: Path) -> dict[int, list]:
     # {idx: row} from a previous run's rows.jsonl. Tolerates a truncated last
     # line (crash mid-write) by skipping it -- that example regenerates.
@@ -208,6 +205,13 @@ def format_meta(prompt: str, response: str, gold, score: float, label: int) -> s
     )
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    # Write-then-rename, so a job killed mid-write never leaves a truncated file behind.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def write_example(
     out_dir: Path,
     field: torch.Tensor,
@@ -220,11 +224,12 @@ def write_example(
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    np.save(out_dir / "tokens.npy", field.to(save_dtype).numpy())
+    tmp = out_dir / "tokens.npy.tmp"
+    with open(tmp, "wb") as f:
+        np.save(f, field.to(save_dtype).numpy())
+    os.replace(tmp, out_dir / "tokens.npy")
 
-    (out_dir / "meta.txt").write_text(
-        format_meta(prompt, response, gold, score, label), encoding="utf-8"
-    )
+    _atomic_write_text(out_dir / "meta.txt", format_meta(prompt, response, gold, score, label))
 
 
 def is_complete(out_dir: Path) -> bool:
@@ -294,39 +299,45 @@ def run_extraction(
     chunk: int | None = None,
     overwrite: bool = False,
     methods: tuple[str, ...] = ("qkv-lens",),
+    variants: tuple[str, ...] = (),
 ) -> None:
     unknown = set(methods) - set(KNOWN_METHODS)
     if unknown:
         raise ValueError(f"unknown method(s) {sorted(unknown)}; known: {KNOWN_METHODS}")
     want_hallushift = "hallushift" in methods
 
-    root = cfg.example_dir()
-    root.mkdir(parents=True, exist_ok=True)
+    variant_cfgs = {cfg.variant_name(): cfg}
+    for name in variants:
+        variant_cfgs.setdefault(name, cfg.for_variant(name))
+    pair = cfg.pair_dir(cfg.dataset.name, cfg.llm.alias)
+    roots = {name: c.example_dir() for name, c in variant_cfgs.items()}
+    for root in roots.values():
+        root.mkdir(parents=True, exist_ok=True)
+    logger.info("variants: %s", ", ".join(roots))
     hs_dir = hallushift_dir(cfg)
     hs_rows_path = hs_dir / "rows.jsonl"
 
-    # Fastest possible pre-check: manifest.jsonl's mere existence (no content
-    # read) is treated as proof a prior non-chunked run completed -- it's the
-    # last thing a run writes. Not stricter than that on purpose: a short
-    # manifest from an interrupted run needs --overwrite to redo.
+    # Fastest possible pre-check: every requested variant's manifest.jsonl
+    # existing (no content read) is treated as proof a prior non-chunked run
+    # completed -- it's the last thing a run writes. A short manifest from an
+    # interrupted run needs --overwrite to redo.
     #
     # Skipped when hallushift is requested: a manifest from a prior
     # qkv-lens-only run proves nothing about hallushift rows existing.
     # Chunked runs share one manifest across chunks, so this can't tell
     # whether THIS chunk's range is done -- they use the index-set check below.
     if not overwrite and chunk is None and not want_hallushift:
-        if (root / "manifest.jsonl").exists():
+        if all((r / "manifest.jsonl").exists() for r in roots.values()):
             logger.info(
-                "%s/%s: manifest.jsonl already exists -- treating as already "
-                "extracted and skipping load_examples/load_llm entirely "
-                "(use --overwrite to redo)",
+                "%s/%s: every requested variant already has a manifest.jsonl -- "
+                "skipping load_examples/load_llm entirely (use --overwrite to redo)",
                 cfg.dataset.name, cfg.llm.alias,
             )
             return
     elif not overwrite and chunk is not None and not want_hallushift:
         lo, hi = (chunk - 1) * 1000, chunk * 1000
         wanted = set(range(lo, hi))
-        if wanted and wanted <= _manifest_complete_indices(root):
+        if wanted and all(wanted <= _manifest_complete_indices(r) for r in roots.values()):
             logger.info(
                 "%s/%s chunk %d: all %d requested examples already complete -- "
                 "skipping load_examples/load_llm entirely (use --overwrite to redo)",
@@ -348,25 +359,28 @@ def run_extraction(
 
     # Partition before touching the GPU: generation is the only step that
     # needs the LLM.
-    #   complete    -> already labeled (and hallushift row present if asked); skip.
-    #   generated   -> tensor+response on disk but unlabeled; reuse (no LLM),
-    #                  rebuild record from meta.txt, let labeling finish it.
-    #                  Still requires hallushift's row if requested -- it
-    #                  can't be recovered retroactively, so a missing row
-    #                  forces regeneration.
-    #   to_generate -> needs the model.
+    #   complete    -> labeled in every requested variant (and hallushift row
+    #                  present if asked); skip.
+    #   generated   -> tensors+response on disk in every variant but unlabeled;
+    #                  reuse (no LLM), let labeling finish it. Still requires
+    #                  hallushift's row if requested -- it can't be recovered
+    #                  retroactively, so a missing row forces regeneration.
+    #   to_generate -> missing from at least one variant; needs the model.
     hs_rows = load_hallushift_rows(hs_rows_path) if want_hallushift else {}
+
+    # A kill between per-variant manifest writes leaves complete examples with no manifest; re-list them.
+    manifests_ok = all((r / "manifest.jsonl").exists() for r in roots.values())
 
     reused: list[dict] = []
     to_generate = []
     skipped = 0
     for ex in examples:
-        ex_dir = root / f"{ex.idx:05d}"
+        ex_dirs = [r / f"{ex.idx:05d}" for r in roots.values()]
         hs_ok = (not want_hallushift) or (ex.idx in hs_rows)
-        if not overwrite and is_complete(ex_dir) and hs_ok:
+        if not overwrite and hs_ok and manifests_ok and all(is_complete(d) for d in ex_dirs):
             skipped += 1
-        elif not overwrite and is_generated(ex_dir) and hs_ok:
-            reused.append(_record_from_meta(ex_dir, ex.idx))
+        elif not overwrite and hs_ok and all(is_generated(d) for d in ex_dirs):
+            reused.append(_record_from_meta(ex_dirs[0], ex.idx))
         else:
             to_generate.append(ex)
 
@@ -416,39 +430,49 @@ def run_extraction(
 
         # M defaults to the layer count (square field); not every model
         # admits that (Qwen2.5-7B's L=28 doesn't divide D_kv=512).
-        n_segments = cfg.extract.n_segments or geom.n_layers
-        geom.check_n_segments(n_segments)
-        for view in VIEWS:
-            d = geom.feature_dim(view)
-            logger.info(
-                "projection %s: D=%d -> %d segments (segment width %d)",
-                view, d, n_segments, d // n_segments,
-            )
-
         n_rows = cfg.extract.l_eff or geom.n_layers
-        logger.info(
-            "field shape per token: %d layers x %d segments x 3 channels (Q, K, V)",
-            n_rows, n_segments,
-        )
-
-        (root / "geometry.json").write_text(
-            json.dumps(
-                {
-                    "llm": cfg.llm.name,
-                    "geometry": asdict(geom),
-                    "n_segments": n_segments,
-                    "n_rows": n_rows,
-                    "projections": list(PROJECTIONS),
-                    "pool": cfg.extract.pool,
-                },
-                indent=2,
+        specs: dict[str, tuple[str, str, int]] = {}
+        for name, c in variant_cfgs.items():
+            source, pool = c.extract.source, c.extract.pool
+            n_segments = c.extract.n_segments or geom.n_layers
+            if source == "qkv":
+                try:
+                    geom.check_n_segments(n_segments)
+                except ValueError as e:
+                    raise ValueError(f"variant {name}: {e}") from e
+            elif geom.hidden_size % n_segments != 0:
+                raise ValueError(
+                    f"variant {name}: n_segments={n_segments} does not evenly "
+                    f"divide hidden_size={geom.hidden_size}"
+                )
+            specs[name] = (source, pool, n_segments)
+            projections = list(PROJECTIONS) if source == "qkv" else ["H"]
+            logger.info(
+                "variant %-10s %s, %s pool, field %d layers x %d segments x %d channel(s)",
+                name, source, pool, n_rows, n_segments, len(projections),
             )
-        )
+            _atomic_write_text(
+                roots[name] / "geometry.json",
+                json.dumps(
+                    {
+                        "llm": cfg.llm.name,
+                        "geometry": asdict(geom),
+                        "n_segments": n_segments,
+                        "n_rows": n_rows,
+                        "projections": projections,
+                        "pool": pool,
+                        "source": source,
+                    },
+                    indent=2,
+                )
+            )
+        want_hidden = any(source == "hidden-states" for source, _, _ in specs.values())
 
         if want_hallushift:
             hs_dir.mkdir(parents=True, exist_ok=True)
-            (hs_dir / "geometry.json").write_text(
-                json.dumps({"llm": cfg.llm.name, "num_layers": geom.n_layers}, indent=2)
+            _atomic_write_text(
+                hs_dir / "geometry.json",
+                json.dumps({"llm": cfg.llm.name, "num_layers": geom.n_layers}, indent=2),
             )
 
         save_dtype = DTYPES[cfg.extract.dtype]
@@ -462,7 +486,7 @@ def run_extraction(
                 "cannot left-pad a batch."
             )
 
-        progress_log = (root / "progress.log").open("a")
+        progress_log = (pair / "progress.log").open("a")
         total_to_generate = len(to_generate)
         batches = [
             to_generate[i : i + batch_size]
@@ -483,6 +507,7 @@ def run_extraction(
                 eos_token_id=stop_ids,
                 attention_mask=attention_mask,
                 capture_generate_outputs=want_hallushift,
+                capture_hidden_states=want_hidden,
             )
 
             for ex, row_out in zip(batch, batch_out):
@@ -524,16 +549,19 @@ def run_extraction(
                             k: v[: cfg.extract.max_tokens] for k, v in generate_outputs.items()
                         }
 
-                field = build_feature_field(
-                    activations, n_segments=n_segments, pool=cfg.extract.pool
-                )
-                if cfg.extract.l_eff is not None:
-                    field = pool_layer_axis(field, cfg.extract.l_eff)
-
-                write_example(
-                    root / f"{ex.idx:05d}", field, ex.prompt, response, ex.gold,
-                    score=float("nan"), label=-1, save_dtype=save_dtype,
-                )
+                for name, (source, pool, n_segments) in specs.items():
+                    if source == "qkv":
+                        field = build_feature_field(activations, n_segments=n_segments, pool=pool)
+                    else:
+                        field = build_hidden_states_field(
+                            activations["H"], n_segments=n_segments, pool=pool
+                        )
+                    if cfg.extract.l_eff is not None:
+                        field = pool_layer_axis(field, cfg.extract.l_eff)
+                    write_example(
+                        roots[name] / f"{ex.idx:05d}", field, ex.prompt, response, ex.gold,
+                        score=float("nan"), label=-1, save_dtype=save_dtype,
+                    )
 
                 records.append(
                     {
@@ -564,23 +592,23 @@ def run_extraction(
 
     logger.info("labeling %d examples with scheme=%s", len(records), cfg.labeling.scheme)
     scored = label_examples(
-        cfg, [r["response"] for r in records], [r["gold"] for r in records]
+        cfg, [r["response"] for r in records], [r["gold"] for r in records], cache_dir=pair
     )
 
     for rec, (score, label) in zip(records, scored):
         rec["score"] = score
         rec["label"] = label
-        (root / rec["dir"] / "meta.txt").write_text(
-            format_meta(rec["prompt"], rec["response"], rec["gold"], score, label),
-            encoding="utf-8",
-        )
+        meta = format_meta(rec["prompt"], rec["response"], rec["gold"], score, label)
+        for root in roots.values():
+            _atomic_write_text(root / rec["dir"] / "meta.txt", meta)
 
-    write_manifest(root, records, chunk)
+    for root in roots.values():
+        write_manifest(root, records, chunk)
 
     n_hall = sum(r["label"] for r in records)
     logger.info(
-        "done: %d examples, %d hallucinated (%.1f%%)",
-        len(records), n_hall, 100 * n_hall / len(records),
+        "done: %d examples x %d variant(s), %d hallucinated (%.1f%%)",
+        len(records), len(roots), n_hall, 100 * n_hall / len(records),
     )
     if n_hall == 0 or n_hall == len(records):
         logger.warning(
@@ -593,265 +621,6 @@ def run_extraction(
             "consider a harder dataset.",
             100 * min(n_hall, len(records) - n_hall) / len(records),
         )
-
-
-def run_hidden_states_extraction(cfg: Config, overwrite: bool = False) -> None:
-    # Writes a (T, L, M, 1) hidden-states field -- the representation
-    # ablation's alternative to the QKV field. Deliberately separate from
-    # run_extraction(): its own tree, no chunking, no --methods.
-    #
-    # Resume mirrors run_extraction's three-way partition (complete / reused
-    # generated-but-unlabeled / to_generate) -- the middle case matters here:
-    # an interrupted multi-hour run leaves exactly this state for every
-    # example it got through, and without this path a second invocation
-    # would re-run the LLM on all of them (observed: a run interrupted at
-    # 277/9960 restarted generation at 0/9960 without this check).
-    root = hidden_states_dir(cfg)
-    root.mkdir(parents=True, exist_ok=True)
-
-    if not overwrite and (root / "manifest.jsonl").exists():
-        logger.info(
-            "%s/%s: hidden-states manifest.jsonl already exists -- skipping "
-            "(use --overwrite to redo)",
-            cfg.dataset.name, cfg.llm.alias,
-        )
-        return
-
-    examples = load_examples(cfg)
-    logger.info("loaded %d examples for %s", len(examples), cfg.dataset.name)
-
-    reused: list[dict] = []
-    to_generate = []
-    skipped = 0
-    for ex in examples:
-        ex_dir = root / f"{ex.idx:05d}"
-        if not overwrite and is_complete(ex_dir):
-            skipped += 1
-        elif not overwrite and is_generated(ex_dir):
-            reused.append(_record_from_meta(ex_dir, ex.idx))
-        else:
-            to_generate.append(ex)
-    if skipped:
-        logger.info("skipped %d already-complete examples (use --overwrite to redo)", skipped)
-    if reused:
-        logger.info(
-            "reusing %d already-generated (but unlabeled) examples: no re-generation",
-            len(reused),
-        )
-
-    records: list[dict] = list(reused)
-
-    if not to_generate:
-        if not reused:
-            logger.info("nothing to generate for hidden-states")
-            return
-        logger.info("nothing to generate; going straight to labeling + manifest")
-        _label_and_write_manifest(cfg, root, records)
-        return
-
-    # Same eager+batch_size=1 requirement as hallushift in run_extraction
-    # (capture_all needs it for capture_generate_outputs).
-    model, tokenizer = load_llm(cfg, require_eager_attention=True)
-    geom = read_geometry(model)
-    device = next(model.parameters()).device
-    logger.info("model geometry: %s", geom)
-
-    stop_ids = resolve_stop_tokens(tokenizer, model)
-    logger.info("stop tokens: %s (%s)", stop_ids, [tokenizer.decode([i]) for i in stop_ids])
-    if not stop_ids:
-        logger.warning(
-            "no stop tokens found: every response will run to max_new_tokens=%d",
-            cfg.dataset.max_new_tokens,
-        )
-
-    n_segments = cfg.extract.n_segments or geom.n_layers
-    # Hidden states are the model's full hidden_size (no GQA width split),
-    # so check directly against hidden_size rather than check_n_segments.
-    if geom.hidden_size % n_segments != 0:
-        raise ValueError(
-            f"n_segments={n_segments} does not evenly divide hidden_size="
-            f"{geom.hidden_size}. Set extract.n_segments to a divisor of "
-            f"{geom.hidden_size} (e.g. one close to {n_segments})."
-        )
-    n_rows = cfg.extract.l_eff or geom.n_layers
-    logger.info(
-        "hidden-states field shape per token: %d layers x %d segments x 1 channel",
-        n_rows, n_segments,
-    )
-
-    (root / "geometry.json").write_text(
-        json.dumps(
-            {
-                "llm": cfg.llm.name,
-                "geometry": asdict(geom),
-                "n_segments": n_segments,
-                "n_rows": n_rows,
-                "projections": ["H"],   # one generic channel, not Q/K/V
-                "pool": cfg.extract.pool,
-            },
-            indent=2,
-        )
-    )
-
-    save_dtype = DTYPES[cfg.extract.dtype]
-    pad_id = tokenizer.eos_token_id or tokenizer.pad_token_id
-    if pad_id is None:
-        raise ValueError(
-            f"{cfg.llm.name} has neither eos_token_id nor pad_token_id; "
-            "cannot left-pad a batch."
-        )
-
-    progress_log = (root / "progress.log").open("a")
-    total_to_generate = len(to_generate)
-    n_done = 0
-
-    for ex in progress(
-        to_generate, desc=f"extract(hidden-states) {cfg.dataset.name}/{cfg.llm.alias}",
-        ncols=100,
-    ):
-        input_ids = build_prompt_ids(ex.prompt, tokenizer, device)
-        (row_out,) = capture_all(
-            model, input_ids, max_new_tokens=cfg.dataset.max_new_tokens,
-            eos_token_id=stop_ids, capture_generate_outputs=True,
-        )
-        _activations, gen_ids, generate_outputs = row_out
-        n_done += 1
-
-        if gen_ids.numel() == 0:
-            logger.warning("example %d generated nothing; skipping", ex.idx)
-            continue
-
-        kept_ids, response = truncate_runon(gen_ids, tokenizer)
-        n_keep = kept_ids.shape[0]
-        hidden = generate_outputs["hidden_states"]
-        if n_keep < gen_ids.shape[0]:
-            hidden = hidden[:n_keep]
-        if cfg.extract.max_tokens and len(hidden) > cfg.extract.max_tokens:
-            hidden = hidden[: cfg.extract.max_tokens]
-
-        hidden_tlD = stack_hidden_states(
-            hidden, n_layers=geom.n_layers, hidden_size=geom.hidden_size
-        )  # (T, L, D)
-        field = build_hidden_states_field(hidden_tlD, n_segments=n_segments, pool=cfg.extract.pool)
-        if cfg.extract.l_eff is not None:
-            field = pool_layer_axis(field, cfg.extract.l_eff)
-
-        write_example(
-            root / f"{ex.idx:05d}", field, ex.prompt, response, ex.gold,
-            score=float("nan"), label=-1, save_dtype=save_dtype,
-        )
-        records.append({
-            "idx": ex.idx, "dir": f"{ex.idx:05d}", "n_tokens": int(field.shape[0]),
-            "prompt": ex.prompt, "response": response, "gold": ex.gold,
-        })
-
-        if n_done % 100 == 0 or n_done == total_to_generate:
-            progress_log.write(f"{n_done}/{total_to_generate}\n")
-            progress_log.flush()
-
-    progress_log.close()
-
-    _label_and_write_manifest(cfg, root, records)
-
-
-def _qkv_labels_by_idx(cfg: Config) -> dict[int, dict]:
-    # {idx: {"response", "score", "label"}} from the QKV corpus's own
-    # manifest + meta.txt, for the same (dataset, llm). Empty if that corpus
-    # hasn't been extracted/labeled yet.
-    root = cfg.example_dir()
-    manifest = root / "manifest.jsonl"
-    if not manifest.exists():
-        return {}
-
-    out: dict[int, dict] = {}
-    with open(manifest) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            label = str(rec.get("label", "")).strip()
-            if label not in ("0", "1"):
-                continue
-            try:
-                meta = parse_meta(root / rec["dir"] / "meta.txt")
-            except OSError:
-                continue
-            out[rec["idx"]] = {
-                "response": meta.get("response", ""),
-                "score": float(rec.get("score", "nan")),
-                "label": int(label),
-            }
-    return out
-
-
-def _label_and_write_manifest(cfg: Config, root: Path, records: list[dict]) -> None:
-    # Shared tail of run_hidden_states_extraction: label every record and
-    # write the manifest.
-    #
-    # Labels are COPIED from the QKV corpus, not recomputed, whenever
-    # possible: QKV and hidden-states extraction share the identical greedy
-    # decode, so for the same idx they produce the same response and
-    # therefore the same label -- rerunning BLEURT would be pure waste.
-    # Verified per example by comparing response text, not assumed; a
-    # mismatch (different max_tokens/truncation between runs) falls back to
-    # labeling just that example.
-    if not records:
-        logger.warning("no new examples extracted")
-        return
-
-    qkv_labels = _qkv_labels_by_idx(cfg)
-    if not qkv_labels:
-        logger.warning(
-            "no labeled QKV corpus found at %s -- labeling all %d hidden-states "
-            "example(s) with scheme=%s instead of copying (expected if the QKV "
-            "corpus for this (dataset, llm) hasn't been extracted/labeled yet)",
-            cfg.example_dir(), len(records), cfg.labeling.scheme,
-        )
-
-    to_recompute: list[dict] = []
-    n_copied = 0
-    for rec in records:
-        qkv = qkv_labels.get(rec["idx"])
-        if qkv is not None and qkv["response"] == rec["response"]:
-            rec["score"], rec["label"] = qkv["score"], qkv["label"]
-            n_copied += 1
-        else:
-            if qkv is not None:
-                logger.warning(
-                    "idx %d: QKV and hidden-states responses differ -- "
-                    "relabeling this example instead of copying "
-                    "(QKV extraction and this run may have used different "
-                    "extract.max_tokens or other generation settings)",
-                    rec["idx"],
-                )
-            to_recompute.append(rec)
-
-    if n_copied:
-        logger.info("copied %d label(s) from the QKV corpus (no BLEURT re-run)", n_copied)
-    if to_recompute:
-        logger.info(
-            "labeling %d example(s) with scheme=%s (no matching QKV label found)",
-            len(to_recompute), cfg.labeling.scheme,
-        )
-        scored = label_examples(
-            cfg, [r["response"] for r in to_recompute], [r["gold"] for r in to_recompute]
-        )
-        for rec, (score, label) in zip(to_recompute, scored):
-            rec["score"], rec["label"] = score, label
-
-    for rec in records:
-        (root / rec["dir"] / "meta.txt").write_text(
-            format_meta(rec["prompt"], rec["response"], rec["gold"], rec["score"], rec["label"]),
-            encoding="utf-8",
-        )
-
-    write_manifest(root, records, chunk=None)
-    n_hall = sum(r["label"] for r in records)
-    logger.info(
-        "done (hidden-states): %d examples, %d hallucinated (%.1f%%)",
-        len(records), n_hall, 100 * n_hall / len(records),
-    )
 
 
 def write_manifest(root: Path, new_records: list[dict], chunk: int | None) -> None:
@@ -872,45 +641,48 @@ def write_manifest(root: Path, new_records: list[dict], chunk: int | None) -> No
         slim = {k: rec[k] for k in ("idx", "dir", "n_tokens", "score", "label")}
         merged[rec["idx"]] = slim
 
-    with open(path, "w") as f:
-        for idx in sorted(merged):
-            f.write(json.dumps(merged[idx]) + "\n")
+    _atomic_write_text(path, "".join(json.dumps(merged[idx]) + "\n" for idx in sorted(merged)))
 
     logger.info("manifest now has %d examples: %s", len(merged), path)
 
 
 def relabel(cfg: Config) -> None:
-    # Recomputes labels from the stored responses without re-extracting.
-    root = cfg.example_dir()
-    path = root / "manifest.jsonl"
-    if not path.exists():
-        raise FileNotFoundError(f"no manifest at {path}; run `extract` first")
+    # Relabels every variant of this (dataset, llm); each unique (response, gold) is scored once.
+    pair = cfg.pair_dir(cfg.dataset.name, cfg.llm.alias)
+    roots = sorted(p.parent for p in pair.glob("*/manifest.jsonl"))
+    if not roots:
+        raise FileNotFoundError(f"no */manifest.jsonl under {pair}; run `extract` first")
 
-    records = []
-    with open(path) as f:
-        for line in f:
-            if line.strip():
-                records.append(json.loads(line))
+    unique: dict[tuple[str, str], int] = {}
+    corpora = []
+    for root in roots:
+        with open(root / "manifest.jsonl") as f:
+            records = [json.loads(line) for line in f if line.strip()]
+        keys = []
+        for rec in records:
+            meta = parse_meta(root / rec["dir"] / "meta.txt")
+            key = (meta["response"], meta["gold"])
+            unique.setdefault(key, len(unique))
+            keys.append(key)
+        corpora.append((root, records, keys))
 
-    responses, golds = [], []
-    for rec in records:
-        meta = parse_meta(root / rec["dir"] / "meta.txt")
-        responses.append(meta["response"])
-        golds.append(meta["gold"])
+    pairs = list(unique)
+    logger.info(
+        "relabeling %d unique response(s) across %d variant(s) with scheme=%s",
+        len(pairs), len(roots), cfg.labeling.scheme,
+    )
+    scored = label_examples(cfg, [r for r, _ in pairs], [g for _, g in pairs], cache_dir=pair)
 
-    logger.info("relabeling %d examples with scheme=%s", len(records), cfg.labeling.scheme)
-    scored = label_examples(cfg, responses, golds)
-
-    for rec, (score, label) in zip(records, scored):
-        rec["score"], rec["label"] = score, label
-
-    with open(path, "w") as f:
-        for rec in sorted(records, key=lambda r: r["idx"]):
-            f.write(json.dumps(rec) + "\n")
-
-    n_hall = sum(r["label"] for r in records)
-    logger.info("relabeled: %d hallucinated of %d (%.1f%%)",
-                n_hall, len(records), 100 * n_hall / len(records))
+    for root, records, keys in corpora:
+        for rec, key in zip(records, keys):
+            rec["score"], rec["label"] = scored[unique[key]]
+        _atomic_write_text(
+            root / "manifest.jsonl",
+            "".join(json.dumps(rec) + "\n" for rec in sorted(records, key=lambda r: r["idx"])),
+        )
+        n_hall = sum(r["label"] for r in records)
+        logger.info("relabeled %s: %d hallucinated of %d (%.1f%%)",
+                    root.name, n_hall, len(records), 100 * n_hall / max(len(records), 1))
 
 
 def parse_meta(path: Path) -> dict:

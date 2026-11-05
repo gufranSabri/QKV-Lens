@@ -3,7 +3,7 @@
 # requirements.txt. Every SLURM script and troubleshooting.sh sources this.
 # Assumes the venv is already created and activated.
 #
-#   bash scripts/install.sh              # core deps only (exact_match labeling)
+#   bash scripts/install.sh              # core deps (exact_match / llm_judge labeling)
 #   bash scripts/install.sh --bleurt     # + BLEURT (needed for HalluShift work)
 #   bash scripts/install.sh --baselines  # + the training-free baselines' deps
 
@@ -37,7 +37,8 @@ pip install $PIP_FLAGS \
   matplotlib \
   accelerate \
   PyWavelets \
-  pytest
+  pytest \
+  openai
 
 echo "[install] core dependencies OK"
 

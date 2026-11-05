@@ -5,7 +5,7 @@ The detector-stage CLI only (extract/train/test/cam/...). Steering entry
 points are separate and will not live in this file.
 
 Subcommands:
-    extract   generate responses, capture Q/K/V, build and save feature fields
+    extract   generate responses, capture Q/K/V (+ hidden states), save feature-field variants
     label     recompute labels from stored responses (no re-extraction needed)
     train     train the detector on one dataset
     test      evaluate a saved checkpoint
@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from src.config import load_config
+from src.config import ALL_VARIANTS, load_config
 from src.utils.logger import setup_logging
 
 
@@ -88,14 +88,12 @@ def main(argv=None) -> int:
              "accepted but NOT extracted here -- see scripts/reproducing_baselines/"
              "haloscope's own script for its separate beam-search generation.",
     )
-
-    p_exhs = sub.add_parser(
-        "extract-hidden-states", parents=[common],
-        help="generate + capture hidden states + save (T,L,M,1) feature fields "
-             "(the representation ablation's QKV alternative)",
+    p_ex.add_argument(
+        "--variants", default="",
+        help="comma-separated extra variants saved from the SAME generation, on top "
+             "of the config's own (default/), e.g. qkv_M8,hs,hs_M16,qkv_max. "
+             "'all' = " + ",".join(ALL_VARIANTS) + ".",
     )
-    p_exhs.add_argument("--overwrite", action="store_true",
-                        help="re-extract examples that already have tokens.npy")
 
     sub.add_parser("label", parents=[common],
                    help="recompute labels from stored responses")
@@ -162,12 +160,19 @@ def main(argv=None) -> int:
         unknown = set(methods) - set(KNOWN_METHODS)
         if unknown:
             parser.error(f"--methods: unknown method(s) {sorted(unknown)}; known: {KNOWN_METHODS}")
-        run_extraction(cfg, chunk=args.chunk, overwrite=args.overwrite, methods=methods)
-
-    elif args.cmd == "extract-hidden-states":
-        from src.extract.run_extraction import run_hidden_states_extraction
-
-        run_hidden_states_extraction(cfg, overwrite=args.overwrite)
+        variants: list[str] = []
+        for v in (v.strip() for v in args.variants.split(",")):
+            if v:
+                variants += ALL_VARIANTS if v == "all" else [v]
+        for v in variants:
+            try:
+                cfg.for_variant(v)
+            except ValueError as e:
+                parser.error(f"--variants: {e}")
+        run_extraction(
+            cfg, chunk=args.chunk, overwrite=args.overwrite, methods=methods,
+            variants=tuple(dict.fromkeys(variants)),
+        )
 
     elif args.cmd == "label":
         from src.extract.run_extraction import relabel

@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.baselines.common import METHODS as BASELINE_METHODS  # noqa: E402
+from src.config import DEFAULT_VARIANT  # noqa: E402
 from src.extract.run_extraction import parse_meta  # noqa: E402
 
 # Top-level entries under data_root that are method outputs, not (dataset, llm_alias) trees.
@@ -29,7 +30,7 @@ def discover_pairs(root: Path) -> list[tuple[str, str]]:
         if not dataset_dir.is_dir() or dataset_dir.name in EXCLUDED_TOP_LEVEL:
             continue
         for model_dir in sorted(dataset_dir.iterdir()):
-            if model_dir.is_dir() and (model_dir / "manifest.jsonl").exists():
+            if model_dir.is_dir() and (model_dir / DEFAULT_VARIANT / "manifest.jsonl").exists():
                 pairs.append((dataset_dir.name, model_dir.name))
     return pairs
 
@@ -46,13 +47,13 @@ def read_manifest(path: Path) -> list[dict]:
 
 
 def export_pair(dataset: str, llm_alias: str, root: Path, out_dir: Path) -> int:
-    pair_dir = root / dataset / llm_alias
+    pair_dir = root / dataset / llm_alias / DEFAULT_VARIANT
     records = read_manifest(pair_dir / "manifest.jsonl")
 
     out_path = out_dir / f"{dataset}_{llm_alias}.csv"
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["idx", "prompt", "gold", "generated_response", "bleurt_score", "hallucination_label"])
+        writer.writerow(["idx", "prompt", "gold", "generated_response", "score", "hallucination_label"])
         for rec in records:
             meta = parse_meta(pair_dir / rec["dir"] / "meta.txt")
             writer.writerow([

@@ -50,5 +50,6 @@ scripts/experiments/
 scripts/figures/
 scripts/tables/
 slurm/
+scripts/exports/
 
 CLAUDE.md

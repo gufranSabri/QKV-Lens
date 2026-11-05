@@ -4,9 +4,9 @@
 # greedy decoding are fixed in code, not config keys -- the steering stage
 # depends on attribution addressing real (layer, segment, projection)
 # coordinates, so changing channel semantics would change what a coordinate
-# means. `extract.pool` is the one ablation axis kept as an opt-in knob; a
-# non-default pool writes to its own data_root subtree (see
-# Config.dataset_dir_for) so it can never shadow the canonical corpus.
+# means. Each (extract.source, extract.pool, extract.n_segments) combination
+# is its own variant directory under {data_root}/{dataset}/{llm_alias}/ (see
+# Config.variant_name) so it can never shadow the default corpus.
 
 from __future__ import annotations
 
@@ -20,17 +20,21 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
-# layer_grid (gated local conv residual over L, collapses to flat_mlp at
-# init) is the MAIN backbone; flat_mlp (no spatial structure) is the
-# structure-preservation ablation's comparison arm.
-VALID_BACKBONES = ("layer_grid", "flat_mlp")
-VALID_SCHEMES = ("exact_match", "bleurt")
+VALID_SCHEMES = ("exact_match", "bleurt", "llm_judge")
 VALID_SOURCES = ("qkv", "hidden-states")
 VALID_COLLAPSE_AXES = ("M", "L", "channels")
+DEFAULT_VARIANT = "default"
+SOURCE_TAGS = {"qkv": "qkv", "hidden-states": "hs"}
+# What `extract --variants all` saves on top of the config's own variant.
+ALL_VARIANTS = (
+    "qkv_M8", "qkv_M16", "qkv_M64", "qkv_M128",
+    "hs", "hs_M8", "hs_M16", "hs_M64", "hs_M128",
+    "qkv_max", "qkv_min",
+)
 
 # Per-model n_segments baked into that model's own config for a structural
 # reason (not an ablation override) -- lets dataset_dir_for tell "this
-# model's one true n_segments" apart from a pooling-ablation sweep's M.
+# model's one true n_segments" apart from an ablation variant's M.
 CANONICAL_N_SEGMENTS: dict[str, int] = {
     "qwen2.5_7b": 32,
 }
@@ -63,29 +67,31 @@ class ExtractConfig:
     # Must stay null for steering: the layer remap is not invertible.
     l_eff: int | None = None
     # Segment-pooling strategy (tensor_ops.POOL_MODES). "mean" is the paper's
-    # fixed setting and the only one steering may run against; max/strided
-    # exist only to reproduce the pooling ablation.
+    # fixed setting and the only one steering may run against.
     pool: str = "mean"
-    # Which field train/test/cam/forecasting read: "qkv" or "hidden-states".
-    # Not read by extract itself -- see extract-hidden-states (detector.py).
+    # Field type, "qkv" or "hidden-states"; with pool and n_segments it picks the variant dir.
     source: str = "qkv"
 
 
 @dataclass
 class LabelingConfig:
-    scheme: str = "bleurt"
+    scheme: str = "llm_judge"
     bleurt_threshold: float = 0.5
     bleurt_checkpoint: str = "models/BLEURT-20-D12"
+    llm_judge_model: str = "deepseek/deepseek-v4-pro"  # Novita AI model id
 
 
 @dataclass
 class ModelConfig:
-    backbone: str = "layer_grid"
     embed_dim: int = 2048       # E: backbone output per token
     conv1d_layers: int = 2
     lstm_hidden: int = 2048
     lstm_layers: int = 1
     dropout: float = 0.3
+    # Component ablation: False -> flatten only / identity / masked mean (conv1d_layers=0 for the conv).
+    use_proj: bool = True
+    use_lstm: bool = True
+    use_attn_pool: bool = True
     # [Q, K] won representation_ablation.csv; null keeps all 3 channels.
     keep_channels: list[str] | None = field(default_factory=lambda: ["Q", "K"])
     # Compress the TOKEN axis to this many buckets by mean-pooling contiguous
@@ -100,10 +106,6 @@ class ModelConfig:
     # averaging, at data-loading time. One of "M", "L", "channels". null
     # collapses nothing. Mutually exclusive with layer_permute_seed.
     collapse_axis: str | None = None
-    # use_gate is moot when use_conv=False; only meaningful for backbone="layer_grid".
-    layer_grid_use_gate: bool = True
-    layer_grid_use_conv: bool = True
-    layer_grid_use_skip: bool = True
 
 
 @dataclass
@@ -141,25 +143,48 @@ class Config:
     def example_dir(self, root: str | None = None) -> Path:
         return self.dataset_dir_for(self.dataset.name, self.llm.alias, root=root)
 
+    def pair_dir(self, dataset_name: str, llm_alias: str, root: str | None = None) -> Path:
+        return Path(root or self.data_root) / dataset_name / llm_alias
+
     def dataset_dir_for(self, dataset_name: str, llm_alias: str, root: str | None = None) -> Path:
-        # {data_root}/{dataset}/{llm_alias}/                                  canonical
-        # {data_root}/pool_{pool}[_ncols{n_segments}]/{dataset}/{llm_alias}/  ablation cell
-        #
-        # Checked against the MODEL's own registered canonical n_segments
-        # (not just "is n_segments None"): Qwen2.5-7B's n_segments=32 is
-        # baked into its config and must resolve to the bare canonical path,
-        # while the other models' non-32 M cells in a pooling-ablation sweep
-        # must NOT collapse onto that same canonical path.
-        base = Path(root or self.data_root)
+        return self.pair_dir(dataset_name, llm_alias, root=root) / self.variant_name(llm_alias)
+
+    def variant_name(self, llm_alias: str | None = None) -> str:
+        # Checked against the model's own canonical n_segments, so Qwen2.5-7B's baked-in M=32 is "default".
         e = self.extract
-        canonical_n_segments = CANONICAL_N_SEGMENTS.get(llm_alias)
-        is_canonical = e.pool == "mean" and e.n_segments == canonical_n_segments
-        if not is_canonical:
-            suffix = f"pool_{e.pool}"
-            if e.n_segments is not None:
-                suffix += f"_ncols{e.n_segments}"
-            base = base / suffix
-        return base / dataset_name / llm_alias
+        parts = [SOURCE_TAGS[e.source]]
+        if e.pool != "mean":
+            parts.append(e.pool)
+        if e.n_segments is not None and e.n_segments != CANONICAL_N_SEGMENTS.get(llm_alias or self.llm.alias):
+            parts.append(f"M{e.n_segments}")
+        name = "_".join(parts)
+        return DEFAULT_VARIANT if name == "qkv" else name
+
+    def for_variant(self, name: str) -> "Config":
+        from src.extract.tensor_ops import POOL_MODES
+
+        tags = {tag: source for source, tag in SOURCE_TAGS.items()}
+        source, pool, n_segments = "qkv", "mean", CANONICAL_N_SEGMENTS.get(self.llm.alias)
+        tokens = [] if name == DEFAULT_VARIANT else name.split("_")
+        if tokens:
+            if tokens[0] not in tags:
+                raise ValueError(f"variant {name!r} must start with one of {sorted(tags)}")
+            source = tags[tokens[0]]
+            for tok in tokens[1:]:
+                if tok in POOL_MODES:
+                    pool = tok
+                elif tok[:1] == "M" and tok[1:].isdigit() and int(tok[1:]) > 0:
+                    n_segments = int(tok[1:])
+                else:
+                    raise ValueError(
+                        f"variant {name!r}: bad part {tok!r} (pool {POOL_MODES} or M<segments>)"
+                    )
+
+        out = copy.deepcopy(self)
+        out.extract.source, out.extract.pool, out.extract.n_segments = source, pool, n_segments
+        if out.variant_name() != name:
+            raise ValueError(f"variant {name!r} is spelled {out.variant_name()!r}")
+        return out
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -182,10 +207,6 @@ class Config:
         if e.source not in VALID_SOURCES:
             raise ValueError(f"extract.source must be one of {VALID_SOURCES}, got {e.source!r}")
 
-        if m.backbone not in VALID_BACKBONES:
-            raise ValueError(
-                f"model.backbone must be one of {VALID_BACKBONES}, got {m.backbone!r}"
-            )
         if m.embed_dim < 1:
             raise ValueError("model.embed_dim must be >= 1")
         if m.lstm_layers < 1:
@@ -235,21 +256,6 @@ class Config:
                 "mutually exclusive: averaging Q/K/V into one channel leaves "
                 "nothing for a per-projection keep-list to select."
             )
-        layer_grid_switches = (m.layer_grid_use_gate, m.layer_grid_use_conv, m.layer_grid_use_skip)
-        if layer_grid_switches != (True, True, True) and m.backbone != "layer_grid":
-            raise ValueError(
-                "model.layer_grid_use_{gate,conv,skip} only apply to "
-                "backbone='layer_grid'"
-            )
-        if m.layer_grid_use_gate and not m.layer_grid_use_conv:
-            raise ValueError(
-                "model.layer_grid_use_gate=true requires "
-                "model.layer_grid_use_conv=true: the gate modulates the conv "
-                "branch, so it has no effect once the conv branch is removed. "
-                "Set layer_grid_use_gate=false too (both give the same model "
-                "when use_conv=false)."
-            )
-
         if la.scheme not in VALID_SCHEMES:
             raise ValueError(f"labeling.scheme must be one of {VALID_SCHEMES}")
 

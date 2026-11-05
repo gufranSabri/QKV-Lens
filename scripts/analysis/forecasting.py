@@ -133,7 +133,7 @@ def compute_trajectories(
     device = pick_device()
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
 
-    source = load_source(cfg, dataset_name, cfg.llm.alias, field_source=cfg.extract.source)
+    source = load_source(cfg, dataset_name, cfg.llm.alias)
     source.stats = ckpt["stats"]
 
     # Held-out rows only. Training rows would make early detection look better

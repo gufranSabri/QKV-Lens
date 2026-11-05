@@ -58,10 +58,11 @@ class QKVFieldDataset(Dataset):
         projections = self.geometry.get("projections")
         # n_channels_on_disk is what's in tokens.npy and what normalize() must
         # standardise over (before any channels collapse); n_channels is what
-        # the model actually sees (differs only under collapse_axis='channels').
+        # the model actually sees.
         self.n_channels_on_disk = len(projections) if projections else N_CHANNELS
         self.is_hidden_states = self.n_channels_on_disk == 1
-        self.n_channels = 1 if self.collapse_axis == "channels" else self.n_channels_on_disk
+        # Hidden states are stacked H,H,H so the model sees 3 channels like QKV.
+        self.n_channels = 1 if self.collapse_axis == "channels" else N_CHANNELS
 
         self.records = []
         with open(manifest) as f:
@@ -119,6 +120,9 @@ class QKVFieldDataset(Dataset):
         field = raw
         if self.stats is not None:
             field = normalize(field, self.stats, n_channels=self.n_channels_on_disk)
+
+        if self.is_hidden_states:
+            field = field.repeat(1, 1, 1, N_CHANNELS)
 
         if self.keep_channels is not None:
             if self.is_hidden_states:

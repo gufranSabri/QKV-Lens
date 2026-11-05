@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from src.config import Config
+from src.config import Config, ModelConfig
 from src.data.dataset import collate, compute_stats
 from src.models.classifier import build_model
 from src.train import load_source, run_epoch
@@ -92,22 +92,22 @@ def test(
         )
 
     ckpt_model_cfg = (ckpt.get("config") or {}).get("model", {})
-    for switch in ("layer_grid_use_gate", "layer_grid_use_conv", "layer_grid_use_skip"):
-        ckpt_val = ckpt_model_cfg.get(switch, True)
-        cfg_val = getattr(cfg.model, switch)
+    for key in ("use_proj", "conv1d_layers", "use_lstm", "use_attn_pool"):
+        ckpt_val = ckpt_model_cfg.get(key, getattr(ModelConfig, key))
+        cfg_val = getattr(cfg.model, key)
         if ckpt_val != cfg_val:
             logger.warning(
                 "%s mismatch: checkpoint was trained with %r, this eval "
                 "config has %r. Pass --set model.%s=%r to match the "
                 "checkpoint, or load_state_dict will fail loudly on a "
                 "missing/unexpected parameter.",
-                switch, ckpt_val, cfg_val, switch, ckpt_val,
+                key, ckpt_val, cfg_val, key, ckpt_val,
             )
 
     name = dataset_name or cfg.dataset.name
     name, eval_set = _resolve_eval_target(name, ckpt, cfg.llm.alias)
 
-    source = load_source(cfg, name, cfg.llm.alias, field_source=cfg.extract.source)
+    source = load_source(cfg, name, cfg.llm.alias)
     if recompute_stats:
         logger.info(
             "recomputing normalization stats from %s (recompute_stats=True)",

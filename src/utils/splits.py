@@ -28,7 +28,10 @@ def make_split(
            "val_fraction": val_fraction, "test_fraction": test_fraction}
 
     if cache is not None and cache.exists():
-        data = json.loads(cache.read_text())
+        try:
+            data = json.loads(cache.read_text())
+        except json.JSONDecodeError:  # truncated by a job killed mid-write
+            data = {}
         # Compare the full parameterisation, not just (n, seed): a run that
         # changes only test_fraction must not silently reuse a stale split.
         if all(data.get(k) == v for k, v in key.items()):

@@ -14,9 +14,8 @@ import torch
 # read and (future) steering-write paths.
 PROJECTIONS = ("Q", "K", "V")
 
-# "mean" is the paper's fixed setting; max/strided exist only to reproduce
-# the pooling ablation (QKV-Lens Table 3), never for steering.
-POOL_MODES = ("mean", "max", "strided")
+# "mean" is the paper's fixed setting; the rest are ablation variants, never for steering.
+POOL_MODES = ("mean", "max", "min", "strided")
 
 
 def mean_pool_segments(raw: torch.Tensor, n_segments: int) -> torch.Tensor:
@@ -26,7 +25,7 @@ def mean_pool_segments(raw: torch.Tensor, n_segments: int) -> torch.Tensor:
 def pool_segments(raw: torch.Tensor, n_segments: int, mode: str = "mean") -> torch.Tensor:
     # raw: (..., D) -> (..., n_segments). D must be divisible by n_segments --
     # a ragged final segment would cover a different span than the others.
-    # mean/max pool each contiguous S-wide chunk; strided takes raw[..., ::S].
+    # mean/max/min pool each contiguous S-wide chunk; strided takes raw[..., ::S].
     if mode not in POOL_MODES:
         raise ValueError(f"pool mode must be one of {POOL_MODES}, got {mode!r}")
 
@@ -47,6 +46,8 @@ def pool_segments(raw: torch.Tensor, n_segments: int, mode: str = "mean") -> tor
     chunked = raw.reshape(*raw.shape[:-1], n_segments, segment_size)
     if mode == "max":
         return chunked.amax(dim=-1)
+    if mode == "min":
+        return chunked.amin(dim=-1)
     return chunked.mean(dim=-1)
 
 
@@ -73,31 +74,6 @@ def build_feature_field(
         )
 
     return torch.stack(per_projection, dim=-1)  # (T, L, M, 3)
-
-
-def stack_hidden_states(
-    hidden_states: tuple[tuple[torch.Tensor, ...], ...],
-    n_layers: int | None = None,
-    hidden_size: int | None = None,
-) -> torch.Tensor:
-    # generate_outputs["hidden_states"] (T per-step tuples of (L+1) per-layer
-    # (1,1,D) tensors, index 0 = embedding output) -> (T, L, D), dropping the
-    # embedding output so L matches the QKV field's layer axis.
-    # n_layers/hidden_size are only needed for the empty-hidden_states case
-    # (T == 0, e.g. a response fully consumed by run-on truncation).
-    if not hidden_states:
-        if n_layers is None or hidden_size is None:
-            raise ValueError(
-                "stack_hidden_states: hidden_states is empty, so n_layers "
-                "and hidden_size are required to build a well-formed "
-                "(0, L, D) tensor."
-            )
-        return torch.empty(0, n_layers, hidden_size, dtype=torch.float32)
-    per_step = []
-    for step in hidden_states:
-        per_layer = [layer[0, 0].float() for layer in step[1:]]
-        per_step.append(torch.stack(per_layer, dim=0))  # (L, D)
-    return torch.stack(per_step, dim=0)  # (T, L, D)
 
 
 def build_hidden_states_field(

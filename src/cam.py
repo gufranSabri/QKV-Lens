@@ -44,7 +44,7 @@ def load_detector(cfg: Config, checkpoint: str | Path, device) -> tuple[torch.nn
 def _load_example(cfg: Config, ckpt: dict, dataset_name: str, idx: int):
     from src.train import load_source
 
-    source = load_source(cfg, dataset_name, cfg.llm.alias, field_source=cfg.extract.source)
+    source = load_source(cfg, dataset_name, cfg.llm.alias)
     source.stats = ckpt["stats"]
     return collate([source[idx]]), source
 

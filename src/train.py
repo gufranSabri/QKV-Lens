@@ -30,25 +30,10 @@ from src.utils.splits import make_split
 logger = get_logger(__name__)
 
 
-def load_source(
-    cfg: Config, dataset_name: str, llm_alias: str, field_source: str = "qkv", **kw
-) -> QKVFieldDataset:
-    # field_source: "qkv" (default, canonical/ablation-cell tree) or
-    # "hidden-states" (the representation ablation's alternative field).
-    # The hidden-states tree is never a pooling-ablation cell, so it's
-    # addressed directly rather than through dataset_dir_for.
-    data_root = Path(cfg.data_root)
-
-    if field_source == "hidden-states":
-        root = data_root / "hidden_states" / dataset_name / llm_alias
-    else:
-        # dataset_name/llm_alias may differ from cfg's own (cross-LLM test()
-        # evaluates a checkpoint's dataset against another LLM's corpus).
-        # extract.pool still comes from cfg.
-        root = cfg.dataset_dir_for(dataset_name, llm_alias, root=str(data_root))
-
+def load_source(cfg: Config, dataset_name: str, llm_alias: str, **kw) -> QKVFieldDataset:
+    # dataset_name/llm_alias may differ from cfg's own (cross-LLM test); the variant always comes from cfg.extract.
     return QKVFieldDataset(
-        root,
+        cfg.dataset_dir_for(dataset_name, llm_alias),
         max_tokens=cfg.extract.max_tokens,
         origin=f"{llm_alias}/{dataset_name}",
         keep_channels=cfg.model.keep_channels,
@@ -115,17 +100,20 @@ def log_run_header(cfg: Config, run_dir, device, dataset_name: str) -> None:
     _section("data")
     logger.info("dataset      : %s", dataset_name)
     logger.info("llm          : %s (%s)", cfg.llm.alias, cfg.llm.name)
+    logger.info("variant      : %s", cfg.example_dir())
     logger.info("max_tokens   : %s | n_segments: %s | l_eff: %s",
                 cfg.extract.max_tokens, cfg.extract.n_segments, cfg.extract.l_eff)
     logger.info("labeling     : %s", cfg.labeling.scheme)
 
     _section("model")
-    logger.info("backbone     : %s", cfg.model.backbone)
     logger.info("input        : 1 field per token x %d channels (Q, K, V), "
                 "(L, M) spatial -> temporal encoder", N_CHANNELS)
     logger.info("embed_dim    : %d | dropout: %.3g", cfg.model.embed_dim, cfg.model.dropout)
     logger.info("temporal     : conv1d x%d | bilstm hidden=%d x%d layer(s)",
                 cfg.model.conv1d_layers, cfg.model.lstm_hidden, cfg.model.lstm_layers)
+    logger.info("components   : proj=%s | conv1d=%s | lstm=%s | attn_pool=%s",
+                cfg.model.use_proj, cfg.model.conv1d_layers > 0,
+                cfg.model.use_lstm, cfg.model.use_attn_pool)
     if cfg.model.layer_permute_seed is not None:
         logger.info(
             "ABLATION     : layer order permuted, seed=%d (structure-preservation control)",
@@ -177,7 +165,7 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     (run_dir / "config.json").write_text(json.dumps(cfg.to_dict(), indent=2))
 
     # ---- data ---------------------------------------------------------
-    full = load_source(cfg, dataset_name, cfg.llm.alias, field_source=cfg.extract.source)
+    full = load_source(cfg, dataset_name, cfg.llm.alias)
     logger.info(
         "source %-28s n=%-6d hallucination rate=%.1f%%",
         full.origin, len(full), 100 * np.mean(full.labels),
@@ -262,10 +250,10 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     # else gets the full lr. scale == 1.0 collapses to a single group.
     scale = cfg.train.backbone_lr_scale
     backbone_lr = cfg.train.lr * scale
-    if scale == 1.0:
+    backbone_params = list(model.backbone.parameters())
+    if scale == 1.0 or not backbone_params:
         param_groups = [{"params": model.parameters(), "lr": cfg.train.lr}]
     else:
-        backbone_params = list(model.backbone.parameters())
         backbone_ids = {id(p) for p in backbone_params}
         other_params = [p for p in model.parameters() if id(p) not in backbone_ids]
         param_groups = [
@@ -355,7 +343,10 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     ckpt = torch.load(run_dir / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
 
-    results = {"best_epoch": best_epoch, "val_auroc": best_auroc}
+    results = {
+        "best_epoch": best_epoch, "val_auroc": best_auroc,
+        "n_params": sum(p.numel() for p in model.parameters() if p.requires_grad),
+    }
 
     va = run_epoch(model, val_loader, criterion, device, desc="final val")
     results["val"] = va
@@ -367,4 +358,4 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
 
 
 def default_run_name(cfg: Config, dataset_name: str) -> str:
-    return f"{cfg.llm.alias}_{dataset_name}_{cfg.model.backbone}"
+    return f"{cfg.llm.alias}_{dataset_name}"

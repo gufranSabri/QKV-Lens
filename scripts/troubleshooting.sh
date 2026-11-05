@@ -26,5 +26,7 @@ bash scripts/install.sh --bleurt
 
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), '|', torch.cuda.get_device_name())"
 
-bash all-datasets_extract.sh
-bash all-datasets_run.sh
+# bash all-datasets_extract.sh
+# bash all-datasets_run.sh
+
+bash scripts/experiments/all_experiments.sh

@@ -264,6 +264,7 @@ def capture_all(
     eos_token_id=None,
     attention_mask: torch.Tensor | None = None,
     capture_generate_outputs: bool = False,
+    capture_hidden_states: bool = False,
 ) -> list[tuple[dict[str, torch.Tensor], torch.Tensor]] | list[tuple[dict, torch.Tensor, dict]]:
     # Greedy-generates and captures per-layer Q/K/V for every generated token.
     # Drives the decode loop by hand (not model.generate) since generate()
@@ -278,6 +279,8 @@ def capture_all(
     # needs attn_implementation="eager" and a full (B, heads, seq, seq) tensor
     # per step. Requires B == 1 -- per-row slicing out of a padded batch isn't
     # implemented here; the caller forces batch_size=1 when this is set.
+    #
+    # capture_hidden_states: adds activations["H"] (T_i, L, D), HF's hidden_states[1:]; batched, no eager needed.
     #
     # Returns a list of B (activations, generated_ids) pairs, or with
     # capture_generate_outputs, (activations, generated_ids, generate_outputs)
@@ -305,6 +308,9 @@ def capture_all(
     step_hidden_states: list[list] = [[] for _ in range(B)]
     step_attentions: list[list] = [[] for _ in range(B)]
     step_logits: list[list] = [[] for _ in range(B)]
+    step_hidden: list[list] = [[] for _ in range(B)]
+    # Decode steps only: prefill hidden states are (B, prompt_len, D) per layer and never used.
+    decode_kwargs = {**extra_kwargs, "output_hidden_states": True} if capture_hidden_states else extra_kwargs
 
     with qkv_hooks(model, batch_size=B) as capture:
         # ---- PREFILL: consume the prompt. NOT recorded. ----
@@ -355,13 +361,17 @@ def capture_all(
                 past_key_values=past,
                 attention_mask=running_mask,
                 use_cache=True,
-                **extra_kwargs,
+                **decode_kwargs,
             )
             past = out.past_key_values
+            if capture_hidden_states:
+                hidden = torch.stack(out.hidden_states[1:], dim=1)[:, :, -1].detach().to("cpu", torch.float32)
 
             for i in range(B):
                 if not finished[i]:
                     generated[i].append(int(next_token[i, 0].item()))
+                    if capture_hidden_states:
+                        step_hidden[i].append(hidden[i])
                     if capture_generate_outputs:
                         step_hidden_states[i].append(
                             tuple(h[i : i + 1].detach().cpu() for h in out.hidden_states)
@@ -379,8 +389,9 @@ def capture_all(
         capture._recording = False
 
     if all(not g for g in generated):
+        views = (*VIEWS, "H") if capture_hidden_states else VIEWS
         empty = [
-            ({v: torch.empty(0) for v in VIEWS}, torch.empty(0, dtype=torch.long))
+            ({v: torch.empty(0) for v in views}, torch.empty(0, dtype=torch.long))
             for _ in range(B)
         ]
         if not capture_generate_outputs:
@@ -405,6 +416,8 @@ def capture_all(
                     "prefill/decode split or per-slot masking is wrong."
                 )
             row_out[view] = tensor
+        if capture_hidden_states:
+            row_out["H"] = torch.stack(step_hidden[i]) if step_hidden[i] else torch.empty(0)
         gen_ids_tensor = torch.tensor(generated[i], dtype=torch.long, device=device)
         if not capture_generate_outputs:
             results.append((row_out, gen_ids_tensor))

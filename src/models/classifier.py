@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from src.data.dataset import N_CHANNELS
-from src.models.backbones import build_backbone
+from src.models.flat_mlp import FlatMLP
 from src.models.temporal import TemporalEncoder
 
 
@@ -26,13 +26,22 @@ class QKVHalluDetector(nn.Module):
         self.cfg = cfg
         self.in_ch = in_ch if in_ch is not None else N_CHANNELS
 
-        self.backbone = build_backbone(cfg, field_shape=field_shape, in_ch=self.in_ch)
+        if field_shape is None:
+            raise ValueError("build_model needs field_shape=(n_rows, n_segments)")
+        n_rows, n_segments = field_shape
+        self.backbone = FlatMLP(
+            n_rows=n_rows, n_segments=n_segments,
+            embed_dim=cfg.model.embed_dim, dropout=cfg.model.dropout, in_ch=self.in_ch,
+            use_proj=cfg.model.use_proj,
+        )
         self.temporal = TemporalEncoder(
-            input_dim=cfg.model.embed_dim,
+            input_dim=self.backbone.embed_dim,
             conv_layers=cfg.model.conv1d_layers,
             lstm_hidden=cfg.model.lstm_hidden,
             lstm_layers=cfg.model.lstm_layers,
             dropout=cfg.model.dropout,
+            use_lstm=cfg.model.use_lstm,
+            use_attn_pool=cfg.model.use_attn_pool,
         )
 
         head_in = self.temporal.out_dim

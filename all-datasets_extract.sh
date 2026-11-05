@@ -1,6 +1,6 @@
 #!/bin/bash
 # Extract the QKV feature field for every (dataset x LLM).
-# One call per pair writes {data_root}/{dataset}/{llm_alias}/.
+# One call per pair writes {data_root}/{dataset}/{llm_alias}/default/ (+ any --variants).
 
 DATASETS=(
     triviaqa
@@ -10,9 +10,9 @@ DATASETS=(
 
 MODELS=(
     qwen2.5_7b
-    # llama2_7b
-    # llama3.1_8b
-    # opt_6.7b
+    llama2_7b
+    llama3.1_8b
+    opt_6.7b
 )
 
 for DATASET in "${DATASETS[@]}"; do

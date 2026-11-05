@@ -53,7 +53,3 @@ for DATASET in "${DATASETS[@]}"; do
 
     done
 done
-
-
-
- python detector.py --config configs/triviaqa/llama3.1-8b.yaml train --run-name test --model.backbone=flat_mlp

@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.baselines.common import METHODS as BASELINE_METHODS  # noqa: E402
+from src.config import DEFAULT_VARIANT  # noqa: E402
 
 
 def load_data_root(config_path: str) -> Path:
@@ -29,7 +30,7 @@ def read_manifest(path: Path) -> list[dict]:
 
 
 def stats_for_pair(dataset: str, llm_alias: str, root: Path) -> dict:
-    pair_dir = root / dataset / llm_alias
+    pair_dir = root / dataset / llm_alias / DEFAULT_VARIANT
     manifest_path = pair_dir / "manifest.jsonl"
     if not manifest_path.exists():
         return {
@@ -91,7 +92,7 @@ def build_report(rows: list[dict]) -> str:
     lines.append("# QKV-Lens migrated corpus stats\n")
     lines.append(
         "Computed from `manifest.jsonl` under the migrated "
-        "`{data_root}/{dataset}/{llm_alias}/` tree. Pairs whose BLEURT "
+        "`{data_root}/{dataset}/{llm_alias}/default/` trees. Pairs whose "
         "relabeling hasn't finished yet show `unlabeled` > 0 and an empty "
         "hallucination rate for the missing rows.\n"
     )
@@ -99,7 +100,7 @@ def build_report(rows: list[dict]) -> str:
     lines.append("## Per (dataset, model)\n")
     lines.append(
         "| Dataset | Model | Total | Labeled | Unlabeled | Hallucinated | "
-        "Hallucination rate | Mean BLEURT | Mean response tokens |"
+        "Hallucination rate | Mean score | Mean response tokens |"
     )
     lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
     for r in rows:

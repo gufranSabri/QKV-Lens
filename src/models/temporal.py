@@ -26,6 +26,17 @@ class MaskedAttentionPool(nn.Module):
         return pooled
 
 
+class MaskedMeanPool(nn.Module):
+    def forward(
+        self, x: torch.Tensor, mask: torch.Tensor, return_weights: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        weights = mask.to(x.dtype) / mask.sum(dim=1, keepdim=True)  # (B, T)
+        pooled = (weights.unsqueeze(-1) * x).sum(dim=1)              # (B, D)
+        if return_weights:
+            return pooled, weights
+        return pooled
+
+
 class TemporalEncoder(nn.Module):
     # Conv1d (local n-grams) -> BiLSTM (long range) -> masked attention pool.
 
@@ -36,6 +47,8 @@ class TemporalEncoder(nn.Module):
         lstm_hidden: int = 128,
         lstm_layers: int = 1,
         dropout: float = 0.3,
+        use_lstm: bool = True,
+        use_attn_pool: bool = True,
     ):
         super().__init__()
 
@@ -48,17 +61,20 @@ class TemporalEncoder(nn.Module):
             ]
         self.convs = nn.Sequential(*convs) if convs else None
 
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=lstm_hidden,
-            num_layers=lstm_layers,
-            batch_first=True,
-            bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
-        )
-        self.pool = MaskedAttentionPool(2 * lstm_hidden)
+        self.lstm = None
+        self.out_dim = input_dim
+        if use_lstm:
+            self.lstm = nn.LSTM(
+                input_size=input_dim,
+                hidden_size=lstm_hidden,
+                num_layers=lstm_layers,
+                batch_first=True,
+                bidirectional=True,
+                dropout=dropout if lstm_layers > 1 else 0.0,
+            )
+            self.out_dim = 2 * lstm_hidden
+        self.pool = MaskedAttentionPool(self.out_dim) if use_attn_pool else MaskedMeanPool()
         self.drop = nn.Dropout(dropout)
-        self.out_dim = 2 * lstm_hidden
 
     def forward(
         self, x: torch.Tensor, mask: torch.Tensor, return_weights: bool = False
@@ -77,13 +93,14 @@ class TemporalEncoder(nn.Module):
             x = self.convs(x.transpose(1, 2)).transpose(1, 2)   # (B, T, F)
             x = x * mask.unsqueeze(-1)
 
-        lengths = mask.sum(dim=1).cpu()
-        packed = nn.utils.rnn.pack_padded_sequence(
-            x, lengths, batch_first=True, enforce_sorted=False
-        )
-        packed_out, _ = self.lstm(packed)
-        out, _ = nn.utils.rnn.pad_packed_sequence(
-            packed_out, batch_first=True, total_length=mask.shape[1]
-        )
+        if self.lstm is not None:
+            lengths = mask.sum(dim=1).cpu()
+            packed = nn.utils.rnn.pack_padded_sequence(
+                x, lengths, batch_first=True, enforce_sorted=False
+            )
+            packed_out, _ = self.lstm(packed)
+            x, _ = nn.utils.rnn.pad_packed_sequence(
+                packed_out, batch_first=True, total_length=mask.shape[1]
+            )
 
-        return self.pool(self.drop(out), mask, return_weights=return_weights)
+        return self.pool(self.drop(x), mask, return_weights=return_weights)
