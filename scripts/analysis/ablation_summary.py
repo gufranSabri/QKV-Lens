@@ -95,81 +95,36 @@ def section_component(lines: list[str]) -> None:
 
 
 def section_representation(lines: list[str]) -> None:
-    lines.append("## 3a. Representation ablation (Q/K/V + hidden states)")
-    rows = _read_csv(TABLES / "representation_ablation.csv")
-    if rows is None:
+    lines.append("## 3a. Representation ablation: Q/K/V vs hs vs hsn, picked on val (TriviaQA)")
+    if _read_csv(TABLES / "representation_ablation.csv") is None:
         lines.append("\n_Not yet run._ See `scripts/experiments/representation_ablation.sh`.\n")
         return
 
-    best_per_model: dict[str, tuple[str, float]] = {}
-    for r in rows:
-        if not r["auroc"]:
-            continue
-        auroc = float(r["auroc"])
-        cur = best_per_model.get(r["model"])
-        if cur is None or auroc > cur[1]:
-            best_per_model[r["model"]] = (r["representation"], auroc)
+    from scripts.tables.representation_ablation import best_combo, cell_label, load_cells, pick
 
-    lines.append("")
-    lines.append("Best representation per model (by held-out AUROC):")
-    lines.append("")
-    lines.append("| Model | Best representation | AUROC | Full QKV | Hidden states |")
-    lines.append("|---|---|---|---|---|")
-    by_model_combo = {(r["model"], r["representation"]): r["auroc"] for r in rows}
-    for model in PRETTY_LLM:
-        best = best_per_model.get(model)
-        if best is None:
-            continue
-        qkv = by_model_combo.get((model, "QKV"))
-        hs = by_model_combo.get((model, "HS"))
-        lines.append(
-            f"| {PRETTY_LLM[model]} | {best[0]} | {_pct(best[1])} "
-            f"| {_pct(qkv)} | {_pct(hs)} |"
-        )
+    cells = load_cells(REPO_ROOT / "runs")
+    best, means, _ = best_combo(cells)
     lines.append("")
     lines.append(
-        "This result feeds section 4 below: a majority vote over each model's "
-        "own best row here picks the representation used for the main "
-        "results (ties/no-majority default to QKV)."
+        f"Q/K/V combo with the highest mean val AUROC: **{best or '-'}** "
+        f"({_pct(means.get(best))})."
     )
+    lines.append("")
+    lines.append("| Model | Field | Picked cell (on val) | Val | Test |")
+    lines.append("|---|---|---|---|---|")
+    for model in PRETTY_LLM:
+        for i, field in enumerate(("QKV", "hs", "hsn")):
+            got = pick(cells, model, field, best)
+            label, (v, t) = (cell_label(got[0]), got[1]) if got else ("-", (None, None))
+            name = PRETTY_LLM[model] if i == 0 else ""
+            lines.append(f"| {name} | {field} | {label} | {_pct(v)} | {_pct(t)} |")
     lines.append("")
     lines.append("Full table: `docs/tables/representation_ablation.md`.")
     lines.append("")
 
 
-def section_pooling(lines: list[str]) -> None:
-    lines.append("## 3b. Pooling ablation: segments M and pooling mode (llama3.1_8b, TriviaQA)")
-    rows = _read_csv(TABLES / "pooling_ablation.csv")
-    if rows is None:
-        lines.append("\n_Not yet run._ See `scripts/experiments/pooling_ablation.sh`.\n")
-        return
-
-    valid = [r for r in rows if r["auroc"]]
-    if not valid:
-        lines.append("\n_Run but no cell produced a result yet._\n")
-        return
-    field = {"qkv": "QKV", "hidden-states": "Hidden states"}
-    best = max(valid, key=lambda r: float(r["auroc"]))
-    lines.append("")
-    lines.append(
-        f"Best cell: **{field.get(best['source'], best['source'])}, {best['pool']} pooling, "
-        f"M={best['n_segments']}** -- AUROC {_pct(best['auroc'])}."
-    )
-    lines.append("")
-    lines.append("| Field | Pool | M | AUROC |")
-    lines.append("|---|---|---|---|")
-    for r in sorted(valid, key=lambda r: -float(r["auroc"]))[:5]:
-        lines.append(
-            f"| {field.get(r['source'], r['source'])} | {r['pool']} | {r['n_segments']} "
-            f"| {_pct(r['auroc'])} |"
-        )
-    lines.append("")
-    lines.append("Full table: `docs/tables/pooling_ablation.md`.")
-    lines.append("")
-
-
 def section_collapse(lines: list[str]) -> None:
-    lines.append("## 3c. Feature-pooling (collapse-axis) ablation (llama3.1_8b, TriviaQA)")
+    lines.append("## 3b. Feature-pooling (collapse-axis) ablation (llama3.1_8b, TriviaQA)")
     rows = _read_csv(TABLES / "collapse_axis_ablation.csv")
     if rows is None:
         lines.append("\n_Not yet run._ See `scripts/experiments/collapse_axis_ablation.sh`.\n")
@@ -201,7 +156,7 @@ def section_collapse(lines: list[str]) -> None:
 
 
 def section_permutation(lines: list[str]) -> None:
-    lines.append("## 3d. Permutation ablation: does true L / M order matter? (llama3.1_8b, TriviaQA)")
+    lines.append("## 3c. Permutation ablation: does true L / M order matter? (llama3.1_8b, TriviaQA)")
     rows = _read_csv(TABLES / "permutation_ablation.csv")
     if rows is None:
         lines.append("\n_Not yet run._ See `scripts/experiments/permutation_ablation.sh`.\n")
@@ -229,48 +184,23 @@ def section_permutation(lines: list[str]) -> None:
 
 
 def section_main_results(lines: list[str]) -> None:
-    lines.append("## 4. Winning representation + main results (4 models x 3 datasets)")
-    rows = _read_csv(TABLES / "representation_ablation.csv")
-    if rows is None:
+    lines.append("## 4. Main results (4 models x 3 datasets)")
+    from scripts.tables.representation_ablation import best_combo, load_cells
+
+    runs_root = REPO_ROOT / "runs"
+    winner = best_combo(load_cells(runs_root))[0] if runs_root.is_dir() else None
+    if winner is None:
         lines.append(
-            "\n_Not yet run._ `all_experiments.sh` reads "
-            "`docs/tables/representation_ablation.csv`, picks the majority-"
-            "vote winning representation, and trains+tests all 4 models x "
-            "3 datasets against it (`runs/{model}_{dataset}/`).\n"
+            "\n_Not yet run._ `all_experiments.sh` takes the Q/K/V combo with the "
+            "highest mean val AUROC from the representation ablation and trains+tests "
+            "all 4 models x 3 datasets with it (`runs/{model}_{dataset}/`).\n"
         )
         return
 
-    from collections import Counter
-
-    best_per_model: dict[str, tuple[str, float]] = {}
-    for r in rows:
-        if not r["auroc"]:
-            continue
-        auroc = float(r["auroc"])
-        cur = best_per_model.get(r["model"])
-        if cur is None or auroc > cur[1]:
-            best_per_model[r["model"]] = (r["representation"], auroc)
-
-    if not best_per_model:
-        lines.append("\n_Representation ablation ran but produced no result yet._\n")
-        return
-
-    votes = Counter(repr_ for repr_, _ in best_per_model.values())
-    top, top_n = votes.most_common(1)[0]
-    n_models = len(best_per_model)
-    winner = top if top_n > n_models / 2 else "QKV"
-
-    lines.append("")
-    lines.append(
-        f"Majority vote over {n_models} model(s)' best representation: "
-        f"{dict(votes)} -> **{winner}**"
-        + ("" if winner == top else " (no majority, defaulted to QKV)") + "."
-    )
-    lines.append("")
-
     datasets = ["triviaqa", "truthfulqa", "coqa"]
     dataset_pretty = {"triviaqa": "TriviaQA", "truthfulqa": "TruthfulQA", "coqa": "CoQA"}
-    lines.append(f"Main results (representation = **{winner}**):")
+    lines.append("")
+    lines.append(f"Main results, test AUROC (Q/K/V combo = **{winner}**, picked on val in 3a):")
     lines.append("")
     lines.append("| Model | " + " | ".join(dataset_pretty[d] for d in datasets) + " |")
     lines.append("|---|" + "---|" * len(datasets))
@@ -345,9 +275,6 @@ def section_qualitative(lines: list[str]) -> None:
     lines.append("| Projection | Peak layer | Peak |diff| | Mean |diff| |")
     lines.append("|---|---|---|---|")
     for proj, s in stats.items():
-        if s.get("zeroed"):
-            lines.append(f"| {proj} | zeroed (not in keep_channels) | - | - |")
-            continue
         lines.append(
             f"| {proj} | {s['peak_layer']} | {s['peak_value']:.5f} | {s['mean_abs_diff']:.5f} |"
         )
@@ -422,7 +349,6 @@ def main() -> None:
         section_hidden_vs_qkv,
         section_component,
         section_representation,
-        section_pooling,
         section_collapse,
         section_permutation,
         section_main_results,

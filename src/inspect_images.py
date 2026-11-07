@@ -30,6 +30,9 @@ def inspect(cfg: Config, idx: int = 0, n_tokens: int = 4, out: str | None = None
     arr = np.load(tokens_path)
     field = arr.astype(np.float32)                # (T, L, M, 3)
     meta = parse_meta(ex_dir / "meta.txt")
+    manifest = root / "manifest.jsonl"
+    rows = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()] if manifest.exists() else []
+    meta["label"] = next((r.get("label") for r in rows if r["idx"] == idx), None)
 
     print(f"\nexample {idx}  ({ex_dir})")
     print(f"  response: {meta.get('response', '')[:120]}")
@@ -74,6 +77,7 @@ def inspect(cfg: Config, idx: int = 0, n_tokens: int = 4, out: str | None = None
         squeeze=False,
     )
 
+    first = 1 if geometry.get("prompt_row") else 0
     for t in range(n_tokens):
         for c, cname in enumerate(PROJECTIONS):
             ax = axes[c][t]
@@ -83,7 +87,7 @@ def inspect(cfg: Config, idx: int = 0, n_tokens: int = 4, out: str | None = None
             if t == 0:
                 ax.set_ylabel(cname, fontsize=9)
             if c == 0:
-                ax.set_title(f"token {t}", fontsize=9)
+                ax.set_title("prompt" if t < first else f"token {t - first}", fontsize=9)
 
     fig.suptitle(
         f"{cfg.dataset.name}/{cfg.llm.alias} example {idx} "

@@ -21,14 +21,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
 VALID_SCHEMES = ("exact_match", "bleurt", "llm_judge")
-VALID_SOURCES = ("qkv", "hidden-states")
+VALID_SOURCES = ("qkv", "hidden-states", "hidden-states-normed")
 VALID_COLLAPSE_AXES = ("M", "L", "channels")
+VALID_TOKEN_ROWS = ("generated", "prompt", "all")
 DEFAULT_VARIANT = "default"
-SOURCE_TAGS = {"qkv": "qkv", "hidden-states": "hs"}
+SOURCE_TAGS = {"qkv": "qkv", "hidden-states": "hs", "hidden-states-normed": "hsn"}
 # What `extract --variants all` saves on top of the config's own variant.
 ALL_VARIANTS = (
     "qkv_M8", "qkv_M16", "qkv_M64", "qkv_M128",
     "hs", "hs_M8", "hs_M16", "hs_M64", "hs_M128",
+    "hsn", "hsn_M8", "hsn_M16", "hsn_M64", "hsn_M128",
     "qkv_max", "qkv_min",
 )
 
@@ -69,7 +71,7 @@ class ExtractConfig:
     # Segment-pooling strategy (tensor_ops.POOL_MODES). "mean" is the paper's
     # fixed setting and the only one steering may run against.
     pool: str = "mean"
-    # Field type, "qkv" or "hidden-states"; with pool and n_segments it picks the variant dir.
+    # Field type, one of VALID_SOURCES; with pool and n_segments it picks the variant dir.
     source: str = "qkv"
 
 
@@ -92,8 +94,10 @@ class ModelConfig:
     use_proj: bool = True
     use_lstm: bool = True
     use_attn_pool: bool = True
-    # [Q, K] won representation_ablation.csv; null keeps all 3 channels.
+    # Channels the detector sees, in Q, K, V order; the rest are dropped, not zeroed. null keeps all 3.
     keep_channels: list[str] | None = field(default_factory=lambda: ["Q", "K"])
+    # Which rows the detector reads: generated tokens, the prompt's last position (row 0 on disk), or both.
+    token_rows: str = "generated"
     # Compress the TOKEN axis to this many buckets by mean-pooling contiguous
     # runs, applied after extract.max_tokens cropping. null keeps every token.
     token_buckets: int | None = None
@@ -124,7 +128,7 @@ class TrainConfig:
     patience: int = 8
     seed: int = 42
     num_workers: int = 4
-    val_fraction: float = 0.25
+    val_fraction: float = 0.1   # of the non-test examples
     test_fraction: float = 0.25
     balance_classes: bool = True
 
@@ -227,6 +231,8 @@ class Config:
                 raise ValueError(
                     f"model.keep_channels: unknown {bad}, valid are {list(PROJECTIONS)}"
                 )
+        if m.token_rows not in VALID_TOKEN_ROWS:
+            raise ValueError(f"model.token_rows must be one of {VALID_TOKEN_ROWS}, got {m.token_rows!r}")
         if m.token_buckets is not None and m.token_buckets < 1:
             raise ValueError("model.token_buckets must be >= 1 or null")
         if m.layer_permute_seed is not None and m.layer_permute_seed < 0:
@@ -263,8 +269,6 @@ class Config:
             raise ValueError("train.val_fraction must be in (0, 1)")
         if not 0.0 <= t.test_fraction < 1.0:
             raise ValueError("train.test_fraction must be in [0, 1)")
-        if t.val_fraction + t.test_fraction >= 1.0:
-            raise ValueError("train.val_fraction + train.test_fraction must be < 1")
 
         if t.lr_decay_start < 0:
             raise ValueError("train.lr_decay_start must be >= 0")

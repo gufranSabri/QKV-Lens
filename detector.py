@@ -5,8 +5,8 @@ The detector-stage CLI only (extract/train/test/cam/...). Steering entry
 points are separate and will not live in this file.
 
 Subcommands:
-    extract   generate responses, capture Q/K/V (+ hidden states), save feature-field variants
-    label     recompute labels from stored responses (no re-extraction needed)
+    extract   phase 1: generate responses, capture Q/K/V (+ hidden states), save field variants (unlabeled)
+    label     phase 2: label every variant's stored responses (no LLM, no re-extraction)
     train     train the detector on one dataset
     test      evaluate a saved checkpoint
     inspect   render feature fields to PNG so you can actually look at them
@@ -74,7 +74,7 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_ex = sub.add_parser("extract", parents=[common],
-                          help="generate + capture Q/K/V + save feature fields")
+                          help="phase 1: generate + capture Q/K/V + save feature fields (no labels)")
     p_ex.add_argument("--chunk", type=int, default=None,
                       help="1-indexed block of 1000 examples (for splitting a long run)")
     p_ex.add_argument("--overwrite", action="store_true",
@@ -95,8 +95,16 @@ def main(argv=None) -> int:
              "'all' = " + ",".join(ALL_VARIANTS) + ".",
     )
 
-    sub.add_parser("label", parents=[common],
-                   help="recompute labels from stored responses")
+    p_lb = sub.add_parser("label", parents=[common],
+                          help="phase 2: label every variant of this (dataset, llm) from stored responses")
+    p_lb.add_argument("--mode", choices=("api", "export"), default="api",
+                      help="api: judge via labeling.scheme (default). export: first run writes a CSV "
+                           "per (dataset, llm) with a blank label column; once you fill it in, the "
+                           "next run imports those labels into every variant")
+    p_lb.add_argument("--sheets", default=None,
+                      help="export mode: folder for the CSVs (default scripts/exports/label_sheets)")
+    p_lb.add_argument("--overwrite", action="store_true",
+                      help="api mode: relabel rows that already have a label (default: only unlabeled ones)")
 
     p_tr = sub.add_parser("train", parents=[common], help="train the detector")
     p_tr.add_argument("--dataset", default=None, help="defaults to the config's dataset")
@@ -177,7 +185,15 @@ def main(argv=None) -> int:
     elif args.cmd == "label":
         from src.extract.run_extraction import relabel
 
-        relabel(cfg)
+        if args.mode == "export":
+            from src.label.sheets import label_from_sheet, sheet_path
+
+            remaining = label_from_sheet(cfg, args.sheets)
+            if remaining:
+                print(f"{remaining} example(s) still unlabeled -- fill in {sheet_path(cfg, args.sheets)} and rerun")
+                return 3
+        else:
+            relabel(cfg, overwrite=args.overwrite)
 
     elif args.cmd == "train":
         from src.train import train

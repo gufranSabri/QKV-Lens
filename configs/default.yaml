@@ -34,7 +34,8 @@ model:
   use_proj: true # false -> flatten only (no Linear)
   use_lstm: true # false -> identity
   use_attn_pool: true # false -> masked mean over real tokens
-  keep_channels: [Q, K] # null keeps all 3; [Q,K] won representation_ablation.csv
+  keep_channels: [Q, K] # the detector sees only these channels (others dropped); null keeps all 3
+  token_rows: generated # generated | prompt | all; prompt = the prompt's last position, before any token is generated
   token_buckets: null # null keeps every token
   layer_permute_seed: null # null keeps true layer order
   segment_permute_seed: null # null keeps true segment (M) order
@@ -51,7 +52,7 @@ train:
   patience: 8
   seed: 42
   num_workers: 4
-  val_fraction: 0.25
+  val_fraction: 0.1 # stratified early-stopping slice of the non-test examples
   test_fraction: 0.25
   balance_classes: true
 

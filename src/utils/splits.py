@@ -1,7 +1,6 @@
-# Stratified train/test split, persisted so runs are comparable. Mirrors
-# HalluShift's classifier.train_combined_model: a single stratified split,
-# with the same held-out set doubling as the early-stopping signal -- there
-# is no separate validation set (val == test below).
+# Stratified train/val/test split, persisted so runs are comparable. The test
+# slice is carved first, then val is a stratified slice of what remains, so
+# early stopping never sees the test set.
 
 from __future__ import annotations
 
@@ -18,12 +17,12 @@ logger = get_logger(__name__)
 
 def make_split(
     labels: list[int],
-    val_fraction: float = 0.2,
-    test_fraction: float = 0.0,
+    val_fraction: float = 0.1,
+    test_fraction: float = 0.25,
     seed: int = 0,
     cache: Path | None = None,
 ) -> tuple[list[int], list[int], list[int]]:
-    # Stratified split of indices into (train, val, test), val == test.
+    # val_fraction is a fraction of the non-test examples, test_fraction of all of them.
     key = {"n": len(labels), "seed": seed,
            "val_fraction": val_fraction, "test_fraction": test_fraction}
 
@@ -36,7 +35,7 @@ def make_split(
         # changes only test_fraction must not silently reuse a stale split.
         if all(data.get(k) == v for k, v in key.items()):
             logger.info("reusing cached split from %s", cache)
-            return data["train"], data["val"], data.get("test", [])
+            return data["train"], data["val"], data["test"]
         logger.warning("cached split at %s is stale; rebuilding", cache)
 
     idx = np.arange(len(labels))
@@ -48,21 +47,16 @@ def make_split(
         logger.warning("only one class present; falling back to an unstratified split")
         return None
 
-    # test_fraction is the eval proportion; val_fraction is the fallback if it
-    # is zero. Same role as HalluShift's test_size either way.
-    eval_fraction = test_fraction if test_fraction > 0 else val_fraction
-    if eval_fraction <= 0:
-        train = sorted(idx.tolist())
-        eval_idx: list[int] = []
-    else:
-        train_arr, eval_arr = train_test_split(
-            idx, test_size=eval_fraction, random_state=seed, stratify=_stratify(y)
+    if test_fraction > 0:
+        rest, test_arr = train_test_split(
+            idx, test_size=test_fraction, random_state=seed, stratify=_stratify(y)
         )
-        train, eval_idx = sorted(train_arr.tolist()), sorted(eval_arr.tolist())
-
-    # HalluShift reuses the same held-out slice for early stopping and for the
-    # final reported metric -- no independent validation set.
-    val, test = eval_idx, eval_idx
+    else:
+        rest, test_arr = idx, idx[:0]
+    train_arr, val_arr = train_test_split(
+        rest, test_size=val_fraction, random_state=seed, stratify=_stratify(y[rest])
+    )
+    train, val, test = (sorted(a.tolist()) for a in (train_arr, val_arr, test_arr))
 
     if cache is not None:
         cache.parent.mkdir(parents=True, exist_ok=True)

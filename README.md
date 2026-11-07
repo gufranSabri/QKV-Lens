@@ -54,9 +54,18 @@ Q/K/V are captured **pre-RoPE**, from forward hooks on each layer's
 different widths (`D_q` vs `D_kv`); each is mean-pooled to the same `M`
 independently, so all three land on one channel axis.
 
-The hidden-states variant (`hs*`) is the same construction over each layer's
-residual stream: one channel `H` instead of three, tiled to `(H, H, H)` at
-load time so the detector sees the same input shape.
+The hidden-states variants are the same construction over each block's
+output, with one channel `H` instead of three, so the detector's input is
+`L x M x 1`:
+
+| Variant | Row l |
+|---|---|
+| `hs*` | HF's `hidden_states[l+1]`: the raw residual stream, except the last row, which HF returns after the final norm |
+| `hsn*` | block l's output after the norm that reads it next: layer l+1's pre-attention norm (the input of its `q_proj`), or the final norm for the last block |
+
+`hsn` is the normalization-matched comparison for QKV: every row is normalized
+the way the model normalizes it, as every Q/K/V input is. See
+`docs/notes/extraction_points.md`.
 
 ## The detector
 
@@ -78,8 +87,9 @@ which is what `scripts/experiments/component_ablation.sh` sweeps:
 ## Usage
 
 ```bash
-python detector.py --config configs/triviaqa/llama3.1_8b.yaml extract
+python detector.py --config configs/triviaqa/llama3.1_8b.yaml extract                  # phase 1 (GPU)
 python detector.py --config configs/triviaqa/llama3.1_8b.yaml extract --variants all
+python detector.py --config configs/triviaqa/llama3.1_8b.yaml label                    # phase 2 (judge API)
 python detector.py --config configs/triviaqa/llama3.1_8b.yaml train --run-name my_run
 python detector.py --config configs/triviaqa/llama3.1_8b.yaml test  --checkpoint runs/my_run/best.pt
 python detector.py --config configs/triviaqa/llama3.1_8b.yaml cam    --checkpoint runs/my_run/best.pt --idx 0
@@ -97,15 +107,18 @@ one tree per `(dataset, LLM)`, one subdirectory per field variant:
     judge_cache.jsonl      llm_judge labels, shared by every variant
     default/               QKV, mean pool, the model's default M
         00000/tokens.npy   (T, L, M, C) float16, C=3 (Q, K, V) or 1 (H)
-        00000/meta.txt     prompt / response / gold / score / label
-        manifest.jsonl     the training index
+        00000/meta.txt     prompt / response / gold
+        manifest.jsonl     the training index (labels live here)
         geometry.json      the model geometry the fields were built with
-    qkv_M8/  hs/  hs_M16/  qkv_max/  ...
+    qkv_M8/  hs/  hs_M16/  hsn/  qkv_max/  ...
 ```
 
 `extract` saves `default/` only; `--variants qkv_M8,hs,...` (or `--variants all`)
-saves more from the same generation. A variant is named
-`{qkv|hs}[_{max|min|strided}][_M{n_segments}]`, and train/test/cam pick theirs
+saves more from the same generation. Extraction never labels: its manifests
+carry `label: -1` until `label` fills them in, and training refuses an
+unlabeled corpus. `bash all-datasets_extract.sh [extract|label]` runs either
+phase over every `(dataset, LLM)`. A variant is named
+`{qkv|hs|hsn}[_{max|min|strided}][_M{n_segments}]`, and train/test/cam pick theirs
 from `extract.source`, `extract.pool` and `extract.n_segments`.
 
 ## Datasets and models
@@ -118,8 +131,21 @@ comparing the response against the gold references. `labeling.scheme: bleurt`
 reproduces HalluShift's exact protocol instead (max BLEURT-20-D12 against the
 gold references, thresholded at 0.5). Judge calls are cached in
 `judge_cache.jsonl`, so an interrupted labeling run resumes where it stopped.
-`python detector.py ... label` recomputes labels from stored responses for
-every variant of a `(dataset, LLM)`, without re-running the LLM.
+`python detector.py ... label` labels the stored responses of every variant of
+a `(dataset, LLM)`, judging each distinct response once and only rows still
+unlabeled; `--overwrite` relabels everything (e.g. after changing the scheme).
+
+`label --mode export` labels by hand instead of through the API. The first run
+writes `scripts/exports/label_sheets/{dataset}_{llm_alias}.csv` (columns
+`idx, gold, llm_response, label, response_id`, label blank). Fill in the label
+column with 1 (hallucinated) or 0, keep `idx` and `response_id`, and save it
+back as CSV under the same name; sorting rows or Excel re-saving is fine. The
+next `label --mode export` imports every filled-in label into every variant's
+manifest, skipping rows whose stored response changed since the export, and
+exits with code 3 while any example is still unlabeled. Manual labels are
+never overwritten by a later API run unless `--overwrite` is passed.
+`LABEL_MODE=export` switches `all-datasets_extract.sh label` and
+`all_experiments.sh` to this mode.
 
 Qwen2.5-7B needs `extract.n_segments: 32` set explicitly — its `L=28` does not
 divide its `D_kv=512`, so the square-field default is unavailable.
@@ -157,6 +183,9 @@ regenerated: each baseline scores the greedy responses already in
 `{runs_root}/{llm_alias}_{dataset}/split.json` -- the same partition
 `src/train.py` gave QKV-Lens and `scripts/run_training.py` gave HalluShift.
 That is what makes the AUROC column comparable down the whole table.
+`split.json` holds a stratified 25% test slice, then a stratified 10% of the
+rest as `val`, which QKV-Lens early-stops on. HalluShift and the baselines,
+which use no validation set, get `train` + `val` as their training data.
 
 Three stages, each resumable, under `scripts/baselines/`:
 
@@ -201,19 +230,22 @@ that already exists; `RERUN=1` redoes it all.
 
 | Step | What | Script |
 |---|---|---|
-| 0 | Extract TriviaQA × 4 LLMs with `--variants all`; TruthfulQA, CoQA default only | `detector.py extract` |
+| 0 | Extract TriviaQA × 4 LLMs with `--variants all`; TruthfulQA, CoQA default only; then label all of it | `detector.py extract`, `detector.py label` |
 | 1 | Hidden states vs Q/K/V linear probes (3 LLMs) | `scripts/analysis/hidden_vs_qkv.py` |
 | 2 | Component ablation (LLaMA-3.1-8B) | `component_ablation.sh` |
-| 3 | Representation ablation: Q/K/V subsets + hidden states (4 LLMs) | `representation_ablation.sh` |
-| 4 | Pooling ablation: M ∈ {8, 16, 32, 64, 128} for QKV and H, max/min at M=32 | `pooling_ablation.sh` |
-| 5 | Collapse-axis ablation: average out M, L or channels | `collapse_axis_ablation.sh` |
-| 6 | Permutation ablation: shuffle L, M or both, 3 seeds | `permutation_ablation.sh` |
-| 7 | Tables for steps 2–6 | `scripts/tables/*.py` |
-| 8 | Majority-vote representation → main results (4 LLMs × 3 datasets) → baselines | `run_all_baselines.sh` |
-| 9 | Significance, prototype maps, IG heatmap, forecasting | `scripts/analysis/`, `scripts/figures/` |
-| 10 | Digest | `scripts/analysis/ablation_summary.py` |
+| 3 | Representation ablation (4 LLMs), three stages: every Q/K/V channel combo at M=32 → pick the best combo; `hs` and `hsn` at M ∈ {8, 16, 32, 64, 128}; the best combo at M ∈ {8, 16, 64, 128} and with max/min pooling | `representation_ablation.sh` |
+| 4 | Collapse-axis ablation: average out M, L or channels | `collapse_axis_ablation.sh` |
+| 5 | Permutation ablation: shuffle L, M or both, 3 seeds | `permutation_ablation.sh` |
+| 6 | Tables for steps 2–5 | `scripts/tables/*.py` |
+| 7 | Main results (4 LLMs × 3 datasets) with the step-3 combo → baselines | `run_all_baselines.sh` |
+| 8 | Significance, prototype maps, IG heatmap, forecasting | `scripts/analysis/`, `scripts/figures/` |
+| 9 | Digest | `scripts/analysis/ablation_summary.py` |
+
+Every pick in step 3 (the best combo, and each field's best cell in its table)
+is by val AUROC, never test, so the Q/K/V vs hidden-states comparison is not
+biased by Q/K/V having more cells to choose from.
 
 Sweep scripts live in `scripts/experiments/` and each runs on its own. Steps
-2–6 train only: every field they need is a variant step 0 already saved.
+2–5 train only: every field they need is a variant step 0 already saved.
 `scripts/experiments/reproduce_all.sh` is the older driver, which also runs
 cross-model transfer and token-axis compression.

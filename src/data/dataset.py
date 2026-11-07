@@ -19,8 +19,8 @@ HIDDEN_STATE_CHANNELS = ("H",)
 
 
 class QKVFieldDataset(Dataset):
-    # One example = one folder holding tokens.npy of shape (T, L, M, 3).
-    # __getitem__ returns (images, label, origin), images (T, 3, L, M) --
+    # One example = one folder holding tokens.npy of shape (1 + T, L, M, C), row 0 the prompt's last position.
+    # __getitem__ returns (images, label, origin), images (T, C, L, M), C = len(channel_names) --
     # channel axis already in conv position (N, C, H, W).
 
     def __init__(
@@ -30,12 +30,14 @@ class QKVFieldDataset(Dataset):
         max_tokens: int | None = None,
         origin: str | None = None,
         keep_channels: list[str] | None = None,
+        token_rows: str = "generated",
         token_buckets: int | None = None,
         layer_permute_seed: int | None = None,
         segment_permute_seed: int | None = None,
         collapse_axis: str | None = None,
     ):
         self.keep_channels = keep_channels
+        self.token_rows = token_rows
         self.token_buckets = token_buckets
         self.layer_permute_seed = layer_permute_seed
         self.segment_permute_seed = segment_permute_seed
@@ -57,12 +59,35 @@ class QKVFieldDataset(Dataset):
         # assuming N_CHANNELS: a hidden-states corpus has 1 channel, not Q/K/V.
         projections = self.geometry.get("projections")
         # n_channels_on_disk is what's in tokens.npy and what normalize() must
-        # standardise over (before any channels collapse); n_channels is what
-        # the model actually sees.
+        # standardise over; channel_names is what the model actually sees.
         self.n_channels_on_disk = len(projections) if projections else N_CHANNELS
         self.is_hidden_states = self.n_channels_on_disk == 1
-        # Hidden states are stacked H,H,H so the model sees 3 channels like QKV.
-        self.n_channels = 1 if self.collapse_axis == "channels" else N_CHANNELS
+        if self.is_hidden_states and keep_channels is not None:
+            raise ValueError(
+                "model.keep_channels is a Q/K/V-projection ablation and has "
+                "no meaning on a hidden-states corpus (1 channel, not "
+                "named Q/K/V) -- unset it for this data_root."
+            )
+        # Unkept projections are dropped, not zeroed; the rest keep Q, K, V order.
+        self._keep_idx = (
+            None if keep_channels is None
+            else [c for c, p in enumerate(PROJECTIONS) if p in keep_channels]
+        )
+        if self.is_hidden_states:
+            self.channel_names = list(HIDDEN_STATE_CHANNELS)
+        elif self.collapse_axis == "channels":
+            self.channel_names = ["".join(PROJECTIONS)]
+        else:
+            self.channel_names = [p for p in PROJECTIONS if keep_channels is None or p in keep_channels]
+        self.n_channels = len(self.channel_names)
+        self.has_prompt_row = bool(self.geometry.get("prompt_row"))
+        if token_rows != "generated" and not self.has_prompt_row:
+            raise ValueError(
+                f"model.token_rows={token_rows!r} needs a corpus extracted with the prompt row; "
+                f"{self.root} has none. Re-extract it."
+            )
+        # Rows before the first generated token in what __getitem__ returns.
+        self.n_prompt_rows = 0 if token_rows == "generated" else 1
 
         self.records = []
         with open(manifest) as f:
@@ -100,12 +125,13 @@ class QKVFieldDataset(Dataset):
         return [int(r["label"]) for r in self.records]
 
     def _load_raw(self, i) -> torch.Tensor:
-        # (T, L, M, 3) for example i, un-normalised.
+        # (n_prompt_rows + T, L, M, C) for example i, un-normalised.
         rec = self.records[i]
         path = self.root / rec["dir"] / "tokens.npy"
 
         arr = np.load(path)
         field = torch.from_numpy(np.ascontiguousarray(arr)).float()
+        prompt, field = (field[:1], field[1:]) if self.has_prompt_row else (field[:0], field)
 
         if self.max_tokens is not None and field.shape[0] > self.max_tokens:
             field = field[: self.max_tokens]
@@ -113,25 +139,20 @@ class QKVFieldDataset(Dataset):
         if self.token_buckets is not None:
             field = bucket_pool_tokens(field, self.token_buckets)
 
+        if self.token_rows == "prompt":
+            return prompt
+        if self.token_rows == "all":
+            return torch.cat([prompt, field])
         return field
 
     def _finish(self, raw: torch.Tensor) -> torch.Tensor:
-        # normalise -> zero unwanted channels -> collapse an axis -> permute layers/segments -> conv position
+        # normalise -> drop unkept channels -> collapse an axis -> permute layers/segments -> conv position
         field = raw
         if self.stats is not None:
             field = normalize(field, self.stats, n_channels=self.n_channels_on_disk)
 
-        if self.is_hidden_states:
-            field = field.repeat(1, 1, 1, N_CHANNELS)
-
-        if self.keep_channels is not None:
-            if self.is_hidden_states:
-                raise ValueError(
-                    "model.keep_channels is a Q/K/V-projection ablation and has "
-                    "no meaning on a hidden-states corpus (1 channel, not "
-                    "named Q/K/V) -- unset it for this data_root."
-                )
-            field = zero_channels(field, self.keep_channels)
+        if self._keep_idx is not None:
+            field = field[..., self._keep_idx]
 
         if self.collapse_axis is not None:
             field = collapse_axis_mean(field, self.collapse_axis)
@@ -165,14 +186,6 @@ class QKVFieldDataset(Dataset):
         rec = self.records[i]
         images = self._finish(self._load_raw(i))
         return images, float(rec["label"]), self.origin
-
-
-def zero_channels(field: torch.Tensor, keep: list[str]) -> torch.Tensor:
-    # Zero every projection channel NOT in `keep`; channel axis stays width 3.
-    mask = torch.tensor(
-        [1.0 if p in keep else 0.0 for p in PROJECTIONS], dtype=field.dtype
-    ).view(1, 1, 1, N_CHANNELS)
-    return field * mask
 
 
 def collapse_axis_mean(field: torch.Tensor, axis: str) -> torch.Tensor:

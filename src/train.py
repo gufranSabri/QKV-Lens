@@ -13,12 +13,12 @@ from torch.utils.data import DataLoader, Subset
 
 from src.config import Config
 from src.data.dataset import (
-    N_CHANNELS,
     QKVFieldDataset,
     _set_stats,
     collate,
     compute_stats,
 )
+from src.extract.tensor_ops import PROJECTIONS
 from src.models.classifier import build_model
 from src.utils.logger import get_logger, setup_logging
 from src.utils.metrics import compute_metrics, format_metrics
@@ -37,6 +37,7 @@ def load_source(cfg: Config, dataset_name: str, llm_alias: str, **kw) -> QKVFiel
         max_tokens=cfg.extract.max_tokens,
         origin=f"{llm_alias}/{dataset_name}",
         keep_channels=cfg.model.keep_channels,
+        token_rows=cfg.model.token_rows,
         token_buckets=cfg.model.token_buckets,
         layer_permute_seed=cfg.model.layer_permute_seed,
         segment_permute_seed=cfg.model.segment_permute_seed,
@@ -106,8 +107,10 @@ def log_run_header(cfg: Config, run_dir, device, dataset_name: str) -> None:
     logger.info("labeling     : %s", cfg.labeling.scheme)
 
     _section("model")
-    logger.info("input        : 1 field per token x %d channels (Q, K, V), "
-                "(L, M) spatial -> temporal encoder", N_CHANNELS)
+    keep = cfg.model.keep_channels
+    names = [p for p in PROJECTIONS if keep is None or p in keep] if cfg.extract.source == "qkv" else ["H"]
+    logger.info("input        : 1 field per token x %d channel(s) (%s), (L, M) spatial -> temporal encoder",
+                len(names), ", ".join(names))
     logger.info("embed_dim    : %d | dropout: %.3g", cfg.model.embed_dim, cfg.model.dropout)
     logger.info("temporal     : conv1d x%d | bilstm hidden=%d x%d layer(s)",
                 cfg.model.conv1d_layers, cfg.model.lstm_hidden, cfg.model.lstm_layers)
@@ -176,7 +179,6 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
         dataset_name, 100 * cfg.train.test_fraction,
     )
 
-    # HalluShift-style 2-way split: val and heldout are the SAME indices.
     train_idx, val_idx, heldout_idx = make_split(
         full.labels,
         val_fraction=cfg.train.val_fraction,
@@ -184,7 +186,8 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
         seed=cfg.train.seed,
         cache=run_dir / "split.json",
     )
-    logger.info("split        : train %d | val/heldout %d", len(train_idx), len(val_idx))
+    logger.info("split        : train %d | val %d | heldout %d",
+                len(train_idx), len(val_idx), len(heldout_idx))
 
     geom = full.geometry
     n_rows, n_segments = geom.get("n_rows"), geom.get("n_segments")
@@ -211,6 +214,7 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
         Subset(full, train_idx), shuffle=True, drop_last=True, **loader_kw
     )
     val_loader = DataLoader(Subset(full, val_idx), shuffle=False, **loader_kw)
+    test_loader = DataLoader(Subset(full, heldout_idx), shuffle=False, **loader_kw)
 
     # ---- model --------------------------------------------------------
     # collapse_axis shrinks L or M to 1 at data-loading time; geometry.json's
@@ -351,6 +355,11 @@ def train(cfg: Config, dataset_name: str, run_name: str | None = None) -> dict:
     va = run_epoch(model, val_loader, criterion, device, desc="final val")
     results["val"] = va
     logger.info("FINAL val  | %s", format_metrics(va))
+
+    if heldout_idx:
+        te = run_epoch(model, test_loader, criterion, device, desc="final test")
+        results["test"] = te
+        logger.info("FINAL test | %s", format_metrics(te))
 
     (run_dir / "results.json").write_text(json.dumps(results, indent=2))
     logger.info("results written to %s", run_dir / "results.json")

@@ -8,15 +8,19 @@
 #         judge_cache.jsonl  llm_judge labels, shared by every variant
 #         progress.log       "i/total" appended every 100 generated examples
 #         default/           QKV, mean pool, the model's default M
-#             00000/tokens.npy   (T, L, M, C) float16, C=3 (Q, K, V) or 1 (H)
-#             00000/meta.txt     prompt / response / gold / score / label
-#             manifest.jsonl     one JSON line per example (the training index)
+#             00000/tokens.npy   (1 + T, L, M, C) float16, C=3 (Q, K, V) or 1 (H, for hs and hsn);
+#                                row 0 = the prompt's last position, row t + 1 = generated token t
+#             00000/meta.txt     prompt / response / gold
+#             manifest.jsonl     one JSON line per example (the training index, labels included)
 #             geometry.json      the model geometry the fields were built with
-#         qkv_M8/ hs/ hs_M16/ qkv_max/ ...   named by Config.variant_name
+#         qkv_M8/ hs/ hs_M16/ hsn/ qkv_max/ ...   named by Config.variant_name
 #
-# Restartable: an example already complete in every requested variant is
+# Restartable: an example already generated in every requested variant is
 # skipped unless --overwrite; one missing from any variant is regenerated and
 # written to all of them, so every variant of an example comes from one decode.
+#
+# Extraction never labels: manifests are written with label -1, and `label`
+# (relabel below) fills them in for every variant afterwards.
 #
 # `methods` selects which scripts/reproducing_baselines/ pipeline(s) also get
 # fed from this SAME generation call (default: qkv-lens only).
@@ -117,8 +121,8 @@ def truncate_runon(gen_ids: torch.Tensor, tokenizer) -> tuple[torch.Tensor, str]
     # leading newline with no run-on intent (confirmed case:
     # truthfulqa/llama2_7b idx 432) -- the search resumes past it.
     #
-    # Returns (kept_ids, kept_text), unchanged if no marker survives, or
-    # (empty, "") if there's truly no content before the marker.
+    # Returns (kept_ids, kept_text); unchanged (the whole response) if no
+    # marker survives or the cut would leave nothing.
     if gen_ids.numel() == 0:
         return gen_ids, ""
 
@@ -137,18 +141,18 @@ def truncate_runon(gen_ids: torch.Tensor, tokenizer) -> tuple[torch.Tensor, str]
     n_total = gen_ids.shape[0]
     for n in range(1, n_total + 1):
         prefix_text = tokenizer.decode(gen_ids[:n], skip_special_tokens=True)
-        if len(prefix_text) >= cutoff_char:
+        # Strictly past the cutoff: token n reaches into the marker. A token ending exactly at it is kept.
+        if len(prefix_text) > cutoff_char:
             kept_ids = gen_ids[: max(n - 1, 0)]
             kept_text = tokenizer.decode(kept_ids, skip_special_tokens=True).rstrip()
             if not kept_text:
-                # marker appears essentially immediately, nothing real before it
-                return gen_ids[:0], ""
+                return gen_ids, full_text
             # .rstrip() can change the token count via BPE re-merge; find how
             # many of kept_ids' own tokens survive, rather than trusting len().
             m = len(kept_ids)
             while m > 0 and tokenizer.decode(kept_ids[:m], skip_special_tokens=True).rstrip() != kept_text:
                 m -= 1
-            return kept_ids[:m], kept_text
+            return (kept_ids[:m], kept_text) if m else (gen_ids, full_text)
     return gen_ids, full_text
 
 
@@ -195,14 +199,8 @@ def append_hallushift_row(path: Path, idx: int, row: list) -> None:
         f.write(json.dumps({"idx": idx, "row": row}) + "\n")
 
 
-def format_meta(prompt: str, response: str, gold, score: float, label: int) -> str:
-    return (
-        f"prompt: {prompt}\n"
-        f"response: {response}\n"
-        f"gold: {gold}\n"
-        f"score: {score}\n"
-        f"label: {label}\n"
-    )
+def format_meta(prompt: str, response: str, gold) -> str:
+    return f"prompt: {prompt}\nresponse: {response}\ngold: {gold}\n"
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -218,8 +216,6 @@ def write_example(
     prompt: str,
     response: str,
     gold,
-    score: float,
-    label: int,
     save_dtype: torch.dtype,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -229,20 +225,7 @@ def write_example(
         np.save(f, field.to(save_dtype).numpy())
     os.replace(tmp, out_dir / "tokens.npy")
 
-    _atomic_write_text(out_dir / "meta.txt", format_meta(prompt, response, gold, score, label))
-
-
-def is_complete(out_dir: Path) -> bool:
-    if not (out_dir / "tokens.npy").exists():
-        return False
-    meta_path = out_dir / "meta.txt"
-    if not meta_path.exists():
-        return False
-    try:
-        label = parse_meta(meta_path).get("label", "").strip()
-        return label in ("0", "1")
-    except OSError:
-        return False
+    _atomic_write_text(out_dir / "meta.txt", format_meta(prompt, response, gold))
 
 
 def is_generated(out_dir: Path) -> bool:
@@ -263,7 +246,7 @@ def is_generated(out_dir: Path) -> bool:
 def _record_from_meta(out_dir: Path, idx: int) -> dict:
     # Rebuilds the in-memory record for an already-generated example from disk.
     meta = parse_meta(out_dir / "meta.txt")
-    n_tokens = int(np.load(out_dir / "tokens.npy", mmap_mode="r").shape[0])
+    n_tokens = int(np.load(out_dir / "tokens.npy", mmap_mode="r").shape[0]) - 1
     return {
         "idx": idx,
         "dir": out_dir.name,
@@ -274,24 +257,13 @@ def _record_from_meta(out_dir: Path, idx: int) -> dict:
     }
 
 
-def _manifest_complete_indices(root: Path) -> set[int]:
-    # Indices manifest.jsonl already records as fully labeled, for `root`.
-    # Reads ONLY manifest.jsonl, so this is cheap enough to check before
-    # paying for load_examples/load_llm.
+def _manifest_indices(root: Path) -> set[int]:
+    # Reads ONLY manifest.jsonl, so this is cheap enough to check before load_examples/load_llm.
     path = root / "manifest.jsonl"
     if not path.exists():
         return set()
-    done: set[int] = set()
     with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            label = str(rec.get("label", "")).strip()
-            if label in ("0", "1"):
-                done.add(rec["idx"])
-    return done
+        return {json.loads(line)["idx"] for line in f if line.strip()}
 
 
 def run_extraction(
@@ -311,8 +283,6 @@ def run_extraction(
         variant_cfgs.setdefault(name, cfg.for_variant(name))
     pair = cfg.pair_dir(cfg.dataset.name, cfg.llm.alias)
     roots = {name: c.example_dir() for name, c in variant_cfgs.items()}
-    for root in roots.values():
-        root.mkdir(parents=True, exist_ok=True)
     logger.info("variants: %s", ", ".join(roots))
     hs_dir = hallushift_dir(cfg)
     hs_rows_path = hs_dir / "rows.jsonl"
@@ -337,7 +307,7 @@ def run_extraction(
     elif not overwrite and chunk is not None and not want_hallushift:
         lo, hi = (chunk - 1) * 1000, chunk * 1000
         wanted = set(range(lo, hi))
-        if wanted and all(wanted <= _manifest_complete_indices(r) for r in roots.values()):
+        if wanted and all(wanted <= _manifest_indices(r) for r in roots.values()):
             logger.info(
                 "%s/%s chunk %d: all %d requested examples already complete -- "
                 "skipping load_examples/load_llm entirely (use --overwrite to redo)",
@@ -359,17 +329,14 @@ def run_extraction(
 
     # Partition before touching the GPU: generation is the only step that
     # needs the LLM.
-    #   complete    -> labeled in every requested variant (and hallushift row
-    #                  present if asked); skip.
-    #   generated   -> tensors+response on disk in every variant but unlabeled;
-    #                  reuse (no LLM), let labeling finish it. Still requires
-    #                  hallushift's row if requested -- it can't be recovered
-    #                  retroactively, so a missing row forces regeneration.
-    #   to_generate -> missing from at least one variant; needs the model.
+    #   done        -> generated in every requested variant and in every
+    #                  manifest (and hallushift row present if asked); skip.
+    #   unlisted    -> generated everywhere but missing from a manifest (a run
+    #                  killed before its manifests were written); re-list it, no LLM.
+    #   to_generate -> missing from at least one variant, or its hallushift
+    #                  row is missing (can't be recovered retroactively).
     hs_rows = load_hallushift_rows(hs_rows_path) if want_hallushift else {}
-
-    # A kill between per-variant manifest writes leaves complete examples with no manifest; re-list them.
-    manifests_ok = all((r / "manifest.jsonl").exists() for r in roots.values())
+    listed = set.intersection(*(_manifest_indices(r) for r in roots.values()))
 
     reused: list[dict] = []
     to_generate = []
@@ -377,20 +344,18 @@ def run_extraction(
     for ex in examples:
         ex_dirs = [r / f"{ex.idx:05d}" for r in roots.values()]
         hs_ok = (not want_hallushift) or (ex.idx in hs_rows)
-        if not overwrite and hs_ok and manifests_ok and all(is_complete(d) for d in ex_dirs):
-            skipped += 1
-        elif not overwrite and hs_ok and all(is_generated(d) for d in ex_dirs):
-            reused.append(_record_from_meta(ex_dirs[0], ex.idx))
+        if not overwrite and hs_ok and all(is_generated(d) for d in ex_dirs):
+            if ex.idx in listed:
+                skipped += 1
+            else:
+                reused.append(_record_from_meta(ex_dirs[0], ex.idx))
         else:
             to_generate.append(ex)
 
     if skipped:
-        logger.info("skipped %d already-complete examples (use --overwrite to redo)", skipped)
+        logger.info("skipped %d already-extracted examples (use --overwrite to redo)", skipped)
     if reused:
-        logger.info(
-            "reusing %d already-generated (but unlabeled) examples: no re-generation",
-            len(reused),
-        )
+        logger.info("re-listing %d generated example(s) missing from a manifest", len(reused))
     if want_hallushift and to_generate:
         n_missing_hs = sum(1 for ex in to_generate if ex.idx not in hs_rows)
         if n_missing_hs:
@@ -431,6 +396,8 @@ def run_extraction(
         # M defaults to the layer count (square field); not every model
         # admits that (Qwen2.5-7B's L=28 doesn't divide D_kv=512).
         n_rows = cfg.extract.l_eff or geom.n_layers
+        for root in roots.values():
+            root.mkdir(parents=True, exist_ok=True)
         specs: dict[str, tuple[str, str, int]] = {}
         for name, c in variant_cfgs.items():
             source, pool = c.extract.source, c.extract.pool
@@ -462,11 +429,13 @@ def run_extraction(
                         "projections": projections,
                         "pool": pool,
                         "source": source,
+                        "prompt_row": True,
                     },
                     indent=2,
                 )
             )
         want_hidden = any(source == "hidden-states" for source, _, _ in specs.values())
+        want_normed = any(source == "hidden-states-normed" for source, _, _ in specs.values())
 
         if want_hallushift:
             hs_dir.mkdir(parents=True, exist_ok=True)
@@ -508,6 +477,7 @@ def run_extraction(
                 attention_mask=attention_mask,
                 capture_generate_outputs=want_hallushift,
                 capture_hidden_states=want_hidden,
+                capture_normed_hidden_states=want_normed,
             )
 
             for ex, row_out in zip(batch, batch_out):
@@ -523,13 +493,13 @@ def run_extraction(
                     logger.warning("example %d generated nothing; skipping", ex.idx)
                     continue
 
-                # Cut before anything else, by token count, so field[t],
+                # Cut before anything else, by token count, so field[t + 1],
                 # response's t-th token, and hallushift's per-token features
-                # stay in exact correspondence.
+                # stay in exact correspondence. Row 0 (the prompt) is never cut.
                 kept_ids, response = truncate_runon(gen_ids, tokenizer)
                 n_keep = kept_ids.shape[0]
                 if n_keep < gen_ids.shape[0]:
-                    activations = {v: t[:n_keep] for v, t in activations.items()}
+                    activations = {v: t[: 1 + n_keep] for v, t in activations.items()}
                     if generate_outputs is not None:
                         generate_outputs = {
                             k: v[:n_keep] for k, v in generate_outputs.items()
@@ -539,10 +509,10 @@ def run_extraction(
                 # compute+disk); response text stays whole for labeling.
                 if (
                     cfg.extract.max_tokens
-                    and activations["Q"].shape[0] > cfg.extract.max_tokens
+                    and activations["Q"].shape[0] - 1 > cfg.extract.max_tokens
                 ):
                     activations = {
-                        v: t[: cfg.extract.max_tokens] for v, t in activations.items()
+                        v: t[: 1 + cfg.extract.max_tokens] for v, t in activations.items()
                     }
                     if generate_outputs is not None:
                         generate_outputs = {
@@ -554,20 +524,21 @@ def run_extraction(
                         field = build_feature_field(activations, n_segments=n_segments, pool=pool)
                     else:
                         field = build_hidden_states_field(
-                            activations["H"], n_segments=n_segments, pool=pool
+                            activations["H" if source == "hidden-states" else "HN"],
+                            n_segments=n_segments, pool=pool,
                         )
                     if cfg.extract.l_eff is not None:
                         field = pool_layer_axis(field, cfg.extract.l_eff)
                     write_example(
                         roots[name] / f"{ex.idx:05d}", field, ex.prompt, response, ex.gold,
-                        score=float("nan"), label=-1, save_dtype=save_dtype,
+                        save_dtype=save_dtype,
                     )
 
                 records.append(
                     {
                         "idx": ex.idx,
                         "dir": f"{ex.idx:05d}",
-                        "n_tokens": int(field.shape[0]),
+                        "n_tokens": int(field.shape[0]) - 1,
                         "prompt": ex.prompt,
                         "response": response,
                         "gold": ex.gold,
@@ -584,43 +555,20 @@ def run_extraction(
 
         progress_log.close()
     elif reused:
-        logger.info("nothing to generate; going straight to labeling + manifest")
+        logger.info("nothing to generate; writing the manifests")
 
     if not records:
         logger.warning("no new examples extracted")
         return
 
-    logger.info("labeling %d examples with scheme=%s", len(records), cfg.labeling.scheme)
-    scored = label_examples(
-        cfg, [r["response"] for r in records], [r["gold"] for r in records], cache_dir=pair
-    )
-
-    for rec, (score, label) in zip(records, scored):
-        rec["score"] = score
-        rec["label"] = label
-        meta = format_meta(rec["prompt"], rec["response"], rec["gold"], score, label)
-        for root in roots.values():
-            _atomic_write_text(root / rec["dir"] / "meta.txt", meta)
-
+    for rec in records:
+        rec["score"], rec["label"] = None, -1
     for root in roots.values():
         write_manifest(root, records, chunk)
-
-    n_hall = sum(r["label"] for r in records)
     logger.info(
-        "done: %d examples x %d variant(s), %d hallucinated (%.1f%%)",
-        len(records), len(roots), n_hall, 100 * n_hall / len(records),
+        "done: %d example(s) x %d variant(s), unlabeled -- run `detector.py label` next",
+        len(records), len(roots),
     )
-    if n_hall == 0 or n_hall == len(records):
-        logger.warning(
-            "DEGENERATE LABELS: every example has the same label. The classifier "
-            "cannot learn anything. Check the prompt template and the gold field."
-        )
-    elif min(n_hall, len(records) - n_hall) / len(records) < 0.05:
-        logger.warning(
-            "labels are highly imbalanced (%.1f%% minority). AUROC will be noisy; "
-            "consider a harder dataset.",
-            100 * min(n_hall, len(records) - n_hall) / len(records),
-        )
 
 
 def write_manifest(root: Path, new_records: list[dict], chunk: int | None) -> None:
@@ -646,8 +594,8 @@ def write_manifest(root: Path, new_records: list[dict], chunk: int | None) -> No
     logger.info("manifest now has %d examples: %s", len(merged), path)
 
 
-def relabel(cfg: Config) -> None:
-    # Relabels every variant of this (dataset, llm); each unique (response, gold) is scored once.
+def relabel(cfg: Config, overwrite: bool = False) -> None:
+    # Labels every variant of this (dataset, llm): only unlabeled rows unless overwrite; each unique (response, gold) is scored once.
     pair = cfg.pair_dir(cfg.dataset.name, cfg.llm.alias)
     roots = sorted(p.parent for p in pair.glob("*/manifest.jsonl"))
     if not roots:
@@ -658,31 +606,44 @@ def relabel(cfg: Config) -> None:
     for root in roots:
         with open(root / "manifest.jsonl") as f:
             records = [json.loads(line) for line in f if line.strip()]
+        todo = [r for r in records if overwrite or r.get("label") not in (0, 1)]
         keys = []
-        for rec in records:
+        for rec in todo:
             meta = parse_meta(root / rec["dir"] / "meta.txt")
             key = (meta["response"], meta["gold"])
             unique.setdefault(key, len(unique))
             keys.append(key)
-        corpora.append((root, records, keys))
+        corpora.append((root, records, todo, keys))
+
+    if not unique:
+        logger.info("%s/%s: every variant is already labeled (use --overwrite to relabel)",
+                    cfg.dataset.name, cfg.llm.alias)
+        return
 
     pairs = list(unique)
     logger.info(
-        "relabeling %d unique response(s) across %d variant(s) with scheme=%s",
+        "labeling %d unique response(s) across %d variant(s) with scheme=%s",
         len(pairs), len(roots), cfg.labeling.scheme,
     )
     scored = label_examples(cfg, [r for r, _ in pairs], [g for _, g in pairs], cache_dir=pair)
 
-    for root, records, keys in corpora:
-        for rec, key in zip(records, keys):
+    for root, records, todo, keys in corpora:
+        if not todo:
+            continue
+        for rec, key in zip(todo, keys):
             rec["score"], rec["label"] = scored[unique[key]]
         _atomic_write_text(
             root / "manifest.jsonl",
             "".join(json.dumps(rec) + "\n" for rec in sorted(records, key=lambda r: r["idx"])),
         )
         n_hall = sum(r["label"] for r in records)
-        logger.info("relabeled %s: %d hallucinated of %d (%.1f%%)",
+        logger.info("labeled %s: %d hallucinated of %d (%.1f%%)",
                     root.name, n_hall, len(records), 100 * n_hall / max(len(records), 1))
+        if n_hall in (0, len(records)):
+            logger.warning(
+                "DEGENERATE LABELS in %s: every example has the same label. The classifier "
+                "cannot learn anything. Check the prompt template and the gold field.", root,
+            )
 
 
 def parse_meta(path: Path) -> dict:

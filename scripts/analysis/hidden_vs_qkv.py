@@ -75,9 +75,11 @@ def load_aligned(model: str, cfg, refresh: bool) -> dict:
         return (_response(qkv_root / qm[i]["dir"] / "meta.txt")
                 == _response(hs_root / hm[i]["dir"] / "meta.txt"))
 
+    first = [int(bool(json.loads((r / "geometry.json").read_text()).get("prompt_row"))) for r in (qkv_root, hs_root)]
+
     def token_mean(i):
-        q = np.load(qkv_root / qm[i]["dir"] / "tokens.npy")[: cfg.extract.max_tokens]
-        h = np.load(hs_root / hm[i]["dir"] / "tokens.npy")[: cfg.extract.max_tokens, ..., 0]
+        q = np.load(qkv_root / qm[i]["dir"] / "tokens.npy")[first[0]:][: cfg.extract.max_tokens]
+        h = np.load(hs_root / hm[i]["dir"] / "tokens.npy")[first[1]:][: cfg.extract.max_tokens, ..., 0]
         return q.astype(np.float32).mean(0), h.astype(np.float32).mean(0)
 
     with ThreadPoolExecutor(16) as ex:

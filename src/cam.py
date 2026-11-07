@@ -56,15 +56,15 @@ def integrated_gradients(
     n_steps: int = DEFAULT_N_STEPS,
     baseline: torch.Tensor | float = 0.0,
 ) -> tuple[torch.Tensor, float]:
-    # images: (1, T, 3, L, M), mask: (1, T) bool
-    # returns (A, p): A is (T, 3, L, M) signed attribution, p is P(hallucinated)
+    # images: (1, T, C, L, M), mask: (1, T) bool
+    # returns (A, p): A is (T, C, L, M) signed attribution, p is P(hallucinated)
     images = images.detach()
     if isinstance(baseline, torch.Tensor):
         base = baseline.detach().to(images.device, images.dtype)
     else:
         base = torch.full_like(images, float(baseline))
 
-    diff = images - base  # (1, T, 3, L, M)
+    diff = images - base  # (1, T, C, L, M)
 
     # alphas in (0, 1], excluding 0 (left-endpoint Riemann sum convention)
     alphas = torch.linspace(1.0 / n_steps, 1.0, n_steps, device=images.device)
@@ -84,7 +84,7 @@ def integrated_gradients(
             grad_sum += interpolated.grad.detach()
 
     avg_grad = grad_sum / n_steps
-    attribution = diff * avg_grad  # (1, T, 3, L, M)
+    attribution = diff * avg_grad  # (1, T, C, L, M)
     return attribution.squeeze(0), prob  # (T, 3, L, M), float
 
 
@@ -112,12 +112,12 @@ def attribution_field(
     # (default) sums the channel axis away to (T, L, M).
     attribution, prob = integrated_gradients(model, images, mask, n_steps=n_steps)
     real_tokens = int(mask[0].sum().item())
-    attribution = attribution[:real_tokens]          # (T_real, 3, L, M)
+    attribution = attribution[:real_tokens]          # (T_real, C, L, M)
 
     if not signed:
         attribution = attribution.abs()
 
-    attribution = attribution.permute(0, 2, 3, 1)     # (T_real, L, M, 3)
+    attribution = attribution.permute(0, 2, 3, 1)     # (T_real, L, M, C), C in dataset.channel_names order
     if not per_projection:
         attribution = attribution.sum(dim=-1)         # (T_real, L, M)
 
@@ -145,7 +145,7 @@ def run_cam(
     name = dataset_name or cfg.dataset.name
     batch, source = _load_example(cfg, ckpt, name, idx)
     images, labels, mask, origins = batch
-    images = images.to(device)          # (1, T, 3, L, M)
+    images = images.to(device)          # (1, T, C, L, M)
     mask = mask.to(device)              # (1, T)
 
     attribution, prob = attribution_field(model, images, mask)
@@ -163,18 +163,17 @@ def run_cam(
         raise ValueError(f"--out must end in .png, got {dest.name!r}")
     _render(
         attribution=attribution[:n_shown].cpu().numpy(),
-        images=images[0, :n_shown].cpu().numpy(),   # (T_shown, 3, L, M)
+        images=images[0, :n_shown].cpu().numpy(),   # (T_shown, C, L, M)
         label=int(labels.item()),
         prob=prob,
         origin=origins[0],
         idx=idx,
         dest=dest,
+        n_prompt=source.n_prompt_rows,
+        channel_names=source.channel_names,
     )
     logger.info("wrote %s (label=%d, p(hallucinated)=%.3f)", dest, int(labels.item()), prob)
     return dest
-
-
-_CHANNEL_NAMES = ("Q", "K", "V")
 
 
 def _render(
@@ -185,8 +184,10 @@ def _render(
     origin: str,
     idx: int,
     dest: Path,
+    n_prompt: int = 0,
+    channel_names: list[str] = ("Q", "K", "V"),
 ) -> None:
-    # attribution: (T, L, M); images: (T, 3, L, M). One row per Q/K/V, one
+    # attribution: (T, L, M); images: (T, C, L, M). One row per channel, one
     # column per token.
     import matplotlib.pyplot as plt
 
@@ -194,7 +195,7 @@ def _render(
 
     fm.apply()
     n_tokens = attribution.shape[0]
-    n_rows = len(_CHANNEL_NAMES)
+    n_rows = len(channel_names)
 
     fig, axes = plt.subplots(
         n_rows, n_tokens,
@@ -210,14 +211,14 @@ def _render(
             ax.set_yticks([])
             fm.strip_frame(ax, keep_bottom=False)
             if c == 0:
-                ax.set_title(f"t{t}", fontsize=8, color=fm.INK)
+                ax.set_title("prompt" if t < n_prompt else f"t{t - n_prompt}", fontsize=8, color=fm.INK)
             if t == 0:
-                ax.set_ylabel(_CHANNEL_NAMES[c], fontsize=9, color=fm.INK_SOFT)
+                ax.set_ylabel(channel_names[c], fontsize=9, color=fm.INK_SOFT)
 
     fm.title(
         fig,
         f"Integrated Gradients  —  {origin} example {idx}",
         f"label={label} (1=hallucinated), p(hallucinated)={prob:.3f}; "
-        f"rows: Q/K/V channel of the field, columns: generated tokens",
+        f"rows: channels of the field ({', '.join(channel_names)}), columns: tokens",
     )
     fm.save(fig, dest.parent, dest.stem)

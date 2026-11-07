@@ -87,7 +87,10 @@ def load_qkv_lens_split(split_json_path: Path, manifest_path: Path) -> tuple[lis
             "manifest_path are for the same (dataset, model) extraction."
         )
 
-    train_rows = [filtered_idxs[p] for p in split["train"]]
+    # Neither HalluShift nor the baselines early-stop on our val slice, so they get train + val.
+    test_pos = set(split["test"])
+    train_pos = sorted(p for p in set(split["train"]) | set(split["val"]) if p not in test_pos)
+    train_rows = [filtered_idxs[p] for p in train_pos]
     test_rows = [filtered_idxs[p] for p in split["test"]]
     return train_rows, test_rows
 

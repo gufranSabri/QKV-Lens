@@ -29,7 +29,7 @@ PRETTY = {
 
 
 def load_field_source(ds: str, model: str):
-    cfg = load_config(str(REPO_ROOT / "configs" / ds / f"{model}.yaml"))
+    cfg = load_config(str(REPO_ROOT / "configs" / ds / f"{model}.yaml"), {"model": {"keep_channels": None}})
     return load_source(cfg, ds, cfg.llm.alias)
 
 
@@ -45,8 +45,8 @@ def collect(ds: str, model: str):
     labels = np.array([int(r["label"]) for r in source.records], dtype=bool)
     X = M = None
     for i in range(n):
-        images, _label, _origin = source[i]              # (T, 3, L, M)
-        field = images.mean(dim=-1).numpy()[:T_MAX]      # (T, 3, L)
+        images, _label, _origin = source[i]              # (n_prompt + T, 3, L, M)
+        field = images[source.n_prompt_rows:].mean(dim=-1).numpy()[:T_MAX]      # (T, 3, L)
         if X is None:
             X = np.zeros((n, 3, T_MAX, field.shape[-1]), np.float32)
             M = np.zeros((n, T_MAX), bool)

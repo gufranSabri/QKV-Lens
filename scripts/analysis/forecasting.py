@@ -8,7 +8,6 @@ import numpy as np
 import torch
 
 from src.config import Config
-from src.data.dataset import normalize
 from src.models.classifier import build_model
 from src.utils.logger import get_logger
 from src.utils.progress import progress
@@ -30,11 +29,12 @@ THRESHOLD = 0.5
 class Trajectory:
     idx: int
     label: int                # 1 = hallucinated
-    probs: np.ndarray         # (T,) p(hallucinated) after seeing tokens 1..t
+    probs: np.ndarray         # (n_prompt + T,) p(hallucinated) after each prefix of rows
+    n_prompt: int = 0         # rows before the first generated token (the prompt row)
 
     @property
     def n_tokens(self) -> int:
-        return len(self.probs)
+        return len(self.probs) - self.n_prompt
 
     @property
     def correct(self) -> np.ndarray:
@@ -56,22 +56,23 @@ class Trajectory:
         # NaN (not 1.0) when the final call is wrong, so "never locks in" is
         # distinguishable from "locks in at the very end".
         t = self.first_stable_correct()
-        return float("nan") if t is None else t / self.n_tokens
+        return float("nan") if t is None else max(t - self.n_prompt, 0) / self.n_tokens
 
     def fraction_of(self, values: np.ndarray) -> np.ndarray:
         # Nearest-token, not interpolated: each prefix is a real measurement.
         idx = np.ceil(FRACTIONS * self.n_tokens).astype(int)
-        idx = np.clip(idx, 1, self.n_tokens) - 1
+        idx = np.clip(idx, 1, self.n_tokens) - 1 + self.n_prompt
         return values[idx]
 
 
 def save_trajectories(trajs: list[Trajectory], dest: Path, provenance: dict) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    lengths = np.array([t.n_tokens for t in trajs], dtype=np.int64)
+    lengths = np.array([len(t.probs) for t in trajs], dtype=np.int64)
     np.savez_compressed(
         dest,
         idx=np.array([t.idx for t in trajs], dtype=np.int64),
         label=np.array([t.label for t in trajs], dtype=np.int64),
+        n_prompt=np.array([t.n_prompt for t in trajs], dtype=np.int64),
         lengths=lengths,
         # Ragged: one flat buffer plus the offsets that cut it back apart.
         probs_concat=np.concatenate([t.probs for t in trajs]).astype(np.float32),
@@ -89,6 +90,7 @@ def load_trajectories(src: Path) -> tuple[list[Trajectory], dict]:
                 idx=int(z["idx"][i]),
                 label=int(z["label"][i]),
                 probs=probs[offsets[i]:offsets[i + 1]].astype(np.float64),
+                n_prompt=int(z["n_prompt"][i]) if "n_prompt" in z.files else 0,
             )
             for i in range(len(z["idx"]))
         ]
@@ -135,6 +137,8 @@ def compute_trajectories(
 
     source = load_source(cfg, dataset_name, cfg.llm.alias)
     source.stats = ckpt["stats"]
+    if source.token_rows == "prompt":
+        raise ValueError("forecasting needs generated rows; model.token_rows='prompt' has none")
 
     # Held-out rows only. Training rows would make early detection look better
     # than it is -- the detector has already fit them.
@@ -177,9 +181,7 @@ def compute_trajectories(
     ):
         fields, labels = [], []
         for i in group:
-            raw = source._load_raw(i)                      # (T, L, M, 3)
-            field = normalize(raw, source.stats).permute(0, 3, 1, 2).contiguous()
-            fields.append(field)
+            fields.append(source._finish(source._load_raw(i)))   # (n_prompt + T, C, L, M)
             labels.append(int(source.records[i]["label"]))
 
         # A stored tensor can be shorter than its manifest n_tokens once
@@ -193,6 +195,6 @@ def compute_trajectories(
         for i, lab, probs in zip(
             group, labels, _prefix_probs(model, fields, device, batch_size)
         ):
-            trajectories.append(Trajectory(idx=i, label=lab, probs=probs))
+            trajectories.append(Trajectory(idx=i, label=lab, probs=probs, n_prompt=source.n_prompt_rows))
 
     return trajectories

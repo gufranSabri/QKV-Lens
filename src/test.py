@@ -104,6 +104,17 @@ def test(
                 key, ckpt_val, cfg_val, key, ckpt_val,
             )
 
+    for key in ("keep_channels", "token_rows"):
+        ckpt_val, cfg_val = ckpt_model_cfg.get(key), getattr(cfg.model, key)
+        if key in ckpt_model_cfg and (sorted(ckpt_val) if isinstance(ckpt_val, list) else ckpt_val) != (
+            sorted(cfg_val) if isinstance(cfg_val, list) else cfg_val
+        ):
+            logger.warning(
+                "%s mismatch: checkpoint was trained with %r, this eval config has %r. "
+                "Pass --set model.%s=... to match the checkpoint.",
+                key, ckpt_val, cfg_val, key,
+            )
+
     name = dataset_name or cfg.dataset.name
     name, eval_set = _resolve_eval_target(name, ckpt, cfg.llm.alias)
 
