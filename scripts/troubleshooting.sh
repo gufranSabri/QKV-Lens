@@ -5,7 +5,7 @@
 # ── STEP 0: ALLOCATE (run ONE of these) ────────────────────────────────────
 
 salloc --gpus-per-node=l40s:1 --cpus-per-task=24 --mem=24G --time=3:00:00 --account=aip-lsigal
-# salloc --gpus-per-node=l40s:1 --cpus-per-task=8 --mem=16G --time=1:00:00 --account=aip-lsigal
+# salloc --gpus-per-node=l40s:1 --cpus-per-task=24 --mem=24G --time=12:00:00 --account=aip-lsigal
 # salloc --gpus-per-node=h100:1 --cpus-per-task=24 --mem=60G --time=1:00:00 --account=aip-lsigal
 
 # ── STEP 1: ENVIRONMENT ────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ export HF_HUB_DISABLE_XET=1
 export TF_CPP_MIN_LOG_LEVEL=3
 export HF_HOME=/home/ahmedubc/scratch/hf_cache
 
-bash scripts/install.sh #--bleurt
+bash scripts/install.sh --ollama #--bleurt
 
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), '|', torch.cuda.get_device_name())"
 
@@ -30,3 +30,7 @@ python -c "import torch; print('CUDA:', torch.cuda.is_available(), '|', torch.cu
 # bash all-datasets_run.sh
 
 bash scripts/experiments/all_experiments.sh
+
+# ── ANALYSIS: NARRATIVE ACTS (docs/notes/narrative.md) ─────────────────────
+
+bash scripts/analysis/act1/run_act1.sh

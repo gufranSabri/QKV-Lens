@@ -5,6 +5,7 @@
 #   bash all-datasets_extract.sh extract    # phase 1 only
 #   bash all-datasets_extract.sh label      # phase 2 only
 #   LABEL_MODE=export bash all-datasets_extract.sh label   # export / import CSV sheets instead of the API
+#   LABEL_MODE=ollama bash all-datasets_extract.sh label   # local Ollama judge on this node's GPU (scripts/ollama.sh)
 #   VARIANTS=all bash all-datasets_extract.sh extract
 
 PHASE=${1:-all}
@@ -40,6 +41,7 @@ if [[ "$PHASE" != "label" ]]; then
 fi
 
 if [[ "$PHASE" != "extract" ]]; then
+    [[ "${LABEL_MODE:-api}" == "ollama" ]] && { bash scripts/ollama.sh serve || exit 1; }
     for DATASET in "${DATASETS[@]}"; do
         for MODEL in "${MODELS[@]}"; do
             echo "========================================"
@@ -49,4 +51,5 @@ if [[ "$PHASE" != "extract" ]]; then
             python detector.py --config "configs/$DATASET/$MODEL.yaml" label --mode "${LABEL_MODE:-api}"
         done
     done
+    if [[ "${LABEL_MODE:-api}" == "ollama" ]]; then bash scripts/ollama.sh stop; fi
 fi

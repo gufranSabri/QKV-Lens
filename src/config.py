@@ -20,7 +20,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 
-VALID_SCHEMES = ("exact_match", "bleurt", "llm_judge")
+VALID_SCHEMES = ("exact_match", "bleurt", "llm_judge", "ollama_judge")
 VALID_SOURCES = ("qkv", "hidden-states", "hidden-states-normed")
 VALID_COLLAPSE_AXES = ("M", "L", "channels")
 VALID_TOKEN_ROWS = ("generated", "prompt", "all")
@@ -81,6 +81,7 @@ class LabelingConfig:
     bleurt_threshold: float = 0.5
     bleurt_checkpoint: str = "models/BLEURT-20-D12"
     llm_judge_model: str = "deepseek/deepseek-v4-pro"  # Novita AI model id
+    ollama_model: str = "qwen3.8:27b"  # ollama_judge: local Ollama tag, server at $OLLAMA_HOST
 
 
 @dataclass

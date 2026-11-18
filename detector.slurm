@@ -26,7 +26,7 @@ export HF_HUB_DISABLE_XET=1
 export TF_CPP_MIN_LOG_LEVEL=3
 export HF_HOME=/home/ahmedubc/scratch/hf_cache
 
-bash scripts/install.sh --bleurt --baselines || exit 1
+bash scripts/install.sh --bleurt --baselines --ollama || exit 1
 
 # bash all-datasets_extract.sh
 # bash all-datasets_run.sh

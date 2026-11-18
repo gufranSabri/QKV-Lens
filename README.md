@@ -147,6 +147,23 @@ never overwritten by a later API run unless `--overwrite` is passed.
 `LABEL_MODE=export` switches `all-datasets_extract.sh label` and
 `all_experiments.sh` to this mode.
 
+`scripts/label_lmstudio.py` fills exported sheets on another machine with the
+same judge served by LM Studio: copy it and the CSVs over, run
+`python3 label_lmstudio.py --model <id> *.csv`, copy the CSVs back, then run
+`label --mode export` to import. It uses only Python's standard library.
+
+`label --mode ollama` runs the same judge locally: `labeling.ollama_model`
+(default `qwen3.8:27b`, 18 GB) on an Ollama server on the job's GPU, with no
+API key. `bash scripts/install.sh --ollama` sets it up (Ollama plus the model,
+under `~/scratch/ollama`); it downloads once and skips both afterwards.
+`detector.slurm` and `troubleshooting.sh` already pass the flag.
+
+`LABEL_MODE=ollama` makes `all-datasets_extract.sh label` and
+`all_experiments.sh` start the server before labeling and stop it afterwards;
+run them in a GPU job. Its judgments are cached under their own key, so they
+never mix with Novita's; pass `--overwrite` to relabel rows another judge already
+labeled.
+
 Qwen2.5-7B needs `extract.n_segments: 32` set explicitly — its `L=28` does not
 divide its `D_kv=512`, so the square-field default is unavailable.
 
@@ -214,7 +231,8 @@ bash scripts/install.sh --baselines
 The core install already covers `labeling.scheme: llm_judge` (the default);
 `--bleurt` additionally pulls the TensorFlow BLEURT scorer for
 `labeling.scheme: bleurt` (the HalluShift comparison); `--baselines` adds
-`rouge_score` / `spacy` / `sentencepiece` and the rest the baselines above need.
+`rouge_score` / `spacy` / `sentencepiece` and the rest the baselines above need;
+`--ollama` installs Ollama and `labeling.ollama_model` for `label --mode ollama`.
 
 `labeling.scheme: llm_judge` calls Novita AI's API and needs `NOVITA_API_KEY`
 set in `scripts/.env` or the shell environment.

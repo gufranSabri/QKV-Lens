@@ -97,14 +97,15 @@ def main(argv=None) -> int:
 
     p_lb = sub.add_parser("label", parents=[common],
                           help="phase 2: label every variant of this (dataset, llm) from stored responses")
-    p_lb.add_argument("--mode", choices=("api", "export"), default="api",
+    p_lb.add_argument("--mode", choices=("api", "export", "ollama"), default="api",
                       help="api: judge via labeling.scheme (default). export: first run writes a CSV "
                            "per (dataset, llm) with a blank label column; once you fill it in, the "
-                           "next run imports those labels into every variant")
+                           "next run imports those labels into every variant. ollama: judge with "
+                           "labeling.ollama_model on a local Ollama server (scripts/ollama.sh serve)")
     p_lb.add_argument("--sheets", default=None,
                       help="export mode: folder for the CSVs (default scripts/exports/label_sheets)")
     p_lb.add_argument("--overwrite", action="store_true",
-                      help="api mode: relabel rows that already have a label (default: only unlabeled ones)")
+                      help="api/ollama mode: relabel rows that already have a label (default: only unlabeled ones)")
 
     p_tr = sub.add_parser("train", parents=[common], help="train the detector")
     p_tr.add_argument("--dataset", default=None, help="defaults to the config's dataset")
@@ -193,6 +194,8 @@ def main(argv=None) -> int:
                 print(f"{remaining} example(s) still unlabeled -- fill in {sheet_path(cfg, args.sheets)} and rerun")
                 return 3
         else:
+            if args.mode == "ollama":
+                cfg.labeling.scheme = "ollama_judge"
             relabel(cfg, overwrite=args.overwrite)
 
     elif args.cmd == "train":

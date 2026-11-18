@@ -6,14 +6,17 @@
 #   bash scripts/install.sh              # core deps (exact_match / llm_judge labeling)
 #   bash scripts/install.sh --bleurt     # + BLEURT (needed for HalluShift work)
 #   bash scripts/install.sh --baselines  # + the training-free baselines' deps
+#   bash scripts/install.sh --ollama     # + Ollama and labeling.ollama_model (label --mode ollama)
 
 set -euo pipefail
 
 WITH_BLEURT=0
 WITH_BASELINES=0
+WITH_OLLAMA=0
 for arg in "$@"; do
   [ "$arg" = "--bleurt" ] && WITH_BLEURT=1
   [ "$arg" = "--baselines" ] && WITH_BASELINES=1
+  [ "$arg" = "--ollama" ] && WITH_OLLAMA=1
 done
 
 echo "[install] core dependencies"
@@ -92,6 +95,22 @@ hi, lo = s.score(references=["Paris", "Paris"], candidates=["Paris", "a fish"])
 assert hi > lo, "BLEURT is loaded but scoring nonsense"
 print(f"[install] BLEURT OK  (match={hi:.3f}  mismatch={lo:.3f})")
 PY
+fi
+
+# Only needed for `label --mode ollama`. Binary and models persist under
+# $OLLAMA_DIR (scratch), so the download happens once and later runs skip it.
+if [ "$WITH_OLLAMA" -eq 1 ]; then
+  echo "[install] Ollama judge"
+  (
+    cd "$(dirname "$0")/.."
+    OLLAMA_DIR=${OLLAMA_DIR:-$HOME/scratch/ollama}
+    MODEL=$(python -c "from src.config import load_config; print(load_config('configs/default.yaml').labeling.ollama_model)")
+    NAME=${MODEL%%:*}
+    TAG=${MODEL#"$NAME"}; TAG=${TAG#:}; TAG=${TAG:-latest}
+    [ -x "$OLLAMA_DIR/bin/ollama" ] || bash scripts/ollama.sh install
+    [ -f "$OLLAMA_DIR/models/manifests/registry.ollama.ai/library/$NAME/$TAG" ] || bash scripts/ollama.sh pull "$MODEL"
+    echo "[install] Ollama OK ($MODEL in $OLLAMA_DIR)"
+  )
 fi
 
 echo "[install] done"

@@ -1,5 +1,6 @@
-# Correctness labeling via a cloud LLM judge (Novita AI's OpenAI-compatible
-# API), replacing BLEURT. label = 1 if the judge says the response hallucinates.
+# Correctness labeling via an LLM judge, replacing BLEURT: Novita AI's
+# OpenAI-compatible API (llm_judge) or a local Ollama server (ollama_judge).
+# label = 1 if the judge says the response hallucinates.
 
 from __future__ import annotations
 
@@ -9,8 +10,9 @@ import os
 import sys
 import threading
 import time
+import urllib.request
 from contextlib import nullcontext
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 
 from src.label.exact_match import _as_list
@@ -19,6 +21,9 @@ NOVITA_BASE_URL = "https://api.novita.ai/openai"
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2
 REQUEST_TIMEOUT = 30
+# Judge prompts are a few hundred tokens; a fixed context keeps Ollama from sizing it to the GPU.
+OLLAMA_NUM_CTX = 4096
+OLLAMA_LOAD_TIMEOUT = 900
 
 SYSTEM_PROMPT = (
     "You are a strict hallucination judge. You will be given a model's "
@@ -81,22 +86,66 @@ def _extract_binary_label(text: str) -> int | None:
     return None
 
 
-def _do_request(client, model_name, messages, result_box):
-    # Runs in a worker thread so a hard wall-clock deadline can be enforced
-    # even if the SDK's own timeout never raises.
+def _novita_chat(model_name: str, messages: list[dict]) -> str:
+    response = _get_client(model_name).chat.completions.create(
+        model=model_name,
+        messages=messages,
+        temperature=0,
+        max_tokens=100,
+        extra_body={"enable_thinking": False},
+    )
+    return response.choices[0].message.content or ""
+
+
+def _ollama_host() -> str:
+    host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
+    return host if host.startswith("http") else f"http://{host}"
+
+
+def _ollama_post(path: str, body: dict, timeout: float) -> dict:
+    req = urllib.request.Request(
+        _ollama_host() + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _ollama_chat(model_name: str, messages: list[dict]) -> str:
+    out = _ollama_post("/api/chat", {
+        "model": model_name, "messages": messages, "stream": False, "think": False, "keep_alive": "60m",
+        "options": {"temperature": 0, "num_predict": 16, "num_ctx": OLLAMA_NUM_CTX},
+    }, REQUEST_TIMEOUT)
+    return out["message"]["content"] or ""
+
+
+def _ollama_ready(model_name: str) -> None:
+    # Fails loudly before labeling: an unreachable server would otherwise label everything 0.
+    host = _ollama_host()
     try:
-        result_box["response"] = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=0,
-            max_tokens=100,
-            extra_body={"enable_thinking": False},
-        )
+        with urllib.request.urlopen(host + "/api/tags", timeout=10) as resp:
+            names = {m["name"] for m in json.loads(resp.read()).get("models", [])}
+    except OSError as e:
+        raise RuntimeError(f"no Ollama server at {host} ({e}); start it with `bash scripts/ollama.sh serve`") from e
+    if model_name not in names and f"{model_name}:latest" not in names:
+        raise RuntimeError(f"{model_name} is not pulled on {host} (has {sorted(names)}); "
+                           f"run `bash scripts/ollama.sh pull {model_name}`")
+    from src.utils.logger import get_logger
+
+    get_logger(__name__).info("Ollama: loading %s onto the GPU (can take a few minutes)", model_name)
+    _ollama_post("/api/generate", {"model": model_name, "keep_alive": "60m",
+                                   "options": {"num_ctx": OLLAMA_NUM_CTX}}, OLLAMA_LOAD_TIMEOUT)
+
+
+def _do_request(chat, messages, result_box):
+    # Runs in a worker thread so a hard wall-clock deadline can be enforced
+    # even if the client's own timeout never raises.
+    try:
+        result_box["content"] = chat(messages)
     except Exception as e:  # noqa: BLE001 - surfaced to the caller below
         result_box["error"] = e
 
 
-def _query_judge(client, model_name: str, answer: str, refs: list[str]) -> int | None:
+def _query_judge(chat, answer: str, refs: list[str]) -> int | None:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": _build_user_input(answer, refs)},
@@ -106,7 +155,7 @@ def _query_judge(client, model_name: str, answer: str, refs: list[str]) -> int |
     for attempt in range(1, MAX_RETRIES + 1):
         result_box: dict = {}
         worker = threading.Thread(
-            target=_do_request, args=(client, model_name, messages, result_box), daemon=True
+            target=_do_request, args=(chat, messages, result_box), daemon=True
         )
         worker.start()
         worker.join(timeout=REQUEST_TIMEOUT)
@@ -116,7 +165,7 @@ def _query_judge(client, model_name: str, answer: str, refs: list[str]) -> int |
         elif "error" in result_box:
             last_err = str(result_box["error"])
         else:
-            content = (result_box["response"].choices[0].message.content or "").strip()
+            content = result_box["content"].strip()
             label = _extract_binary_label(content)
             if label is not None:
                 return label
@@ -138,8 +187,7 @@ def score_llm_judge(
     if not refs:
         return 0.0, 1
 
-    client = _get_client(model_name)
-    label = _query_judge(client, model_name, answer, refs)
+    label = _query_judge(partial(_novita_chat, model_name), answer, refs)
     if label is None:
         label = 0
     return float(label), label
@@ -169,6 +217,7 @@ def score_llm_judge_batch(
     golds: list,
     model_name: str = "deepseek/deepseek-v4-pro",
     cache_path: Path | None = None,
+    backend: str = "novita",
 ) -> list[tuple[float, int]]:
     from src.utils.logger import get_logger
     from src.utils.progress import progress
@@ -176,9 +225,14 @@ def score_llm_judge_batch(
     _log = get_logger(__name__)
     cache = _load_cache(cache_path)
     _log.info(
-        "LLM judge: scoring %d examples with model=%s (%d judgments cached at %s)",
-        len(answers), model_name, len(cache), cache_path,
+        "LLM judge: scoring %d examples with %s model=%s (%d judgments cached at %s)",
+        len(answers), backend, model_name, len(cache), cache_path,
     )
+    if backend == "ollama":
+        _ollama_ready(model_name)
+        chat, cache_model = partial(_ollama_chat, model_name), f"ollama/{model_name}"
+    else:
+        chat, cache_model = partial(_novita_chat, model_name), model_name
 
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,13 +245,13 @@ def score_llm_judge_batch(
             if not refs:
                 out.append((0.0, 1))
                 continue
-            key = _cache_key(model_name, answer, refs)
+            key = _cache_key(cache_model, answer, refs)
             label = cache.get(key)
             if label is not None:
                 n_hits += 1
             else:
                 n_queried += 1
-                label = _query_judge(_get_client(model_name), model_name, answer, refs)
+                label = _query_judge(chat, answer, refs)
                 if label is not None and cache_f is not None:
                     cache_f.write(json.dumps({"key": key, "label": label}) + "\n")
                     cache_f.flush()

@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 
@@ -607,13 +608,23 @@ def relabel(cfg: Config, overwrite: bool = False) -> None:
         with open(root / "manifest.jsonl") as f:
             records = [json.loads(line) for line in f if line.strip()]
         todo = [r for r in records if overwrite or r.get("label") not in (0, 1)]
+        corpora.append((root, records, todo))
+
+    n_reads = sum(len(todo) for _, _, todo in corpora)
+    logger.info("%s/%s: reading %d stored response(s) across %d variant(s)",
+                cfg.dataset.name, cfg.llm.alias, n_reads, len(roots))
+    # One small file per example per variant: threads hide the shared filesystem's per-file latency.
+    with ThreadPoolExecutor(32) as pool:
+        metas = list(pool.map(parse_meta, [root / r["dir"] / "meta.txt" for root, _, todo in corpora for r in todo]))
+    it = iter(metas)
+    for i, (root, records, todo) in enumerate(corpora):
         keys = []
-        for rec in todo:
-            meta = parse_meta(root / rec["dir"] / "meta.txt")
+        for _ in todo:
+            meta = next(it)
             key = (meta["response"], meta["gold"])
             unique.setdefault(key, len(unique))
             keys.append(key)
-        corpora.append((root, records, todo, keys))
+        corpora[i] = (root, records, todo, keys)
 
     if not unique:
         logger.info("%s/%s: every variant is already labeled (use --overwrite to relabel)",

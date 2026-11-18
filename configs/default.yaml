@@ -20,10 +20,11 @@ extract:
   l_eff: null # null -> keep the model's L. Must stay null for steering.
 
 labeling:
-  scheme: llm_judge # exact_match | bleurt | llm_judge
+  scheme: llm_judge # exact_match | bleurt | llm_judge | ollama_judge
   bleurt_threshold: 0.5 # hallucination = 1 if max BLEURT <= 0.5
   bleurt_checkpoint: models/BLEURT-20-D12
   llm_judge_model: deepseek/deepseek-v4-pro # Novita AI model id
+  ollama_model: qwen3.8:27b # ollama_judge: local Ollama tag (scripts/ollama.sh), 18 GB
 
 model:
   embed_dim: 2048 # E: backbone output per token
