@@ -34,3 +34,7 @@ bash scripts/experiments/all_experiments.sh
 # ── ANALYSIS: NARRATIVE ACTS (docs/notes/narrative.md) ─────────────────────
 
 bash scripts/analysis/act1/run_act1.sh
+bash scripts/analysis/act2/run_act2.sh
+bash scripts/analysis/act3/run_act3.sh
+bash scripts/analysis/act4/run_act4.sh
+bash scripts/analysis/act5/run_act5.sh

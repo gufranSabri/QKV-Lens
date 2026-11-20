@@ -15,7 +15,7 @@ REPORTS = REPO_ROOT / "docs" / "reports"
 OUT = REPORTS / "ablation_summary.md"
 
 PRETTY_LLM = {
-    "llama2_7b": "LLaMA-2-7B", "llama3.1_8b": "LLaMA-3.1-8B",
+    "llama3.1_8b": "LLaMA-3.1-8B",
     "opt_6.7b": "OPT-6.7B", "qwen2.5_7b": "Qwen2.5-7B",
 }
 

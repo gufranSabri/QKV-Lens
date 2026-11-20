@@ -22,7 +22,6 @@ DATASETS=(
 
 MODELS=(
     qwen2.5_7b
-    llama2_7b
     llama3.1_8b
     opt_6.7b
 )

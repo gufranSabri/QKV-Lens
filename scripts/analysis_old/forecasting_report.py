@@ -24,7 +24,6 @@ USABLE = 0.95
 HEADLINE_FRACTION = 0.25
 
 PRETTY_LLM = {
-    "llama2_7b": "LLaMA-2-7B",
     "llama3.1_8b": "LLaMA-3.1-8B",
     "opt_6.7b": "OPT-6.7B",
     "qwen2.5_7b": "Qwen2.5-7B",
@@ -35,7 +34,7 @@ PRETTY_DATASET = {
     "coqa": "CoQA",
 }
 # Display order for the grid layout; cells outside these lists still render, sorted after.
-LLM_ORDER = ("llama2_7b", "llama3.1_8b", "opt_6.7b", "qwen2.5_7b")
+LLM_ORDER = ("llama3.1_8b", "opt_6.7b", "qwen2.5_7b")
 DATASET_ORDER = ("truthfulqa", "triviaqa", "coqa")
 
 CDF_GRID = np.linspace(0.0, 1.0, 201)

@@ -7,17 +7,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 
+from scripts.figures import style as fm
 from src.config import load_config
 from src.extract.qkv_hooks import get_decoder_layers, read_geometry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 OUT_FIG = REPO_ROOT / "docs" / "figures" / "act1"
 OUT_TAB = REPO_ROOT / "docs" / "tables" / "act1"
+VIEW_COLOUR = {"Q": fm.BLUE, "K": fm.ORANGE, "V": fm.AQUA}
 
 PROJ_ATTR = {"Q": "q_proj", "K": "k_proj", "V": "v_proj"}
 NORM_ATTR_CANDIDATES = ("input_layernorm", "self_attn_layer_norm")
@@ -38,7 +39,7 @@ def layer_spectrum(layer, view: str) -> dict:
     # Effective map the detector's row actually reads: W @ diag(g), since the
     # norm's learned per-channel gain is applied before the projection.
     W_eff = W * g.unsqueeze(0) if g is not None else W
-    s = torch.linalg.svdvals(W_eff)
+    s = torch.linalg.svdvals(W_eff).cpu()
     rank = int((s > s[0] * 1e-6).sum())
     return {
         "d_in": W.shape[1], "d_out": W.shape[0], "rank": rank,
@@ -78,26 +79,66 @@ def write_table(results: list[dict]) -> None:
     print("wrote", path)
 
 
+def write_summary_table(results: list[dict]) -> None:
+    # One row per (model, view): the paper-ready version of spectral_rank.csv,
+    # collapsed across layers.
+    OUT_TAB.mkdir(parents=True, exist_ok=True)
+    path = OUT_TAB / "spectral_rank_summary.csv"
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["model", "view", "d_in", "pct_rank_retained_min",
+                    "pct_rank_retained_median", "cond_number_median"])
+        for res in results:
+            for v in "QKV":
+                layers = res["per_view"][v]
+                pct = [100 * sp["rank"] / min(sp["d_in"], sp["d_out"]) for sp in layers]
+                cond = [sp["cond"] for sp in layers]
+                w.writerow([res["model"], v, layers[0]["d_in"],
+                            f"{min(pct):.2f}", f"{float(np.median(pct)):.2f}",
+                            f"{float(np.median(cond)):.3e}"])
+    print("wrote", path)
+
+
 def fig_spectrum(results: list[dict]) -> None:
-    OUT_FIG.mkdir(parents=True, exist_ok=True)
-    colours = {"Q": "#4C72B0", "K": "#DD8452", "V": "#55A868"}
-    fig, axes = plt.subplots(1, len(results), figsize=(5 * len(results), 4), squeeze=False)
-    for ax, res in zip(axes[0], results):
+    fm.apply()
+    fig, axes = plt.subplots(1, len(results),
+                              figsize=(fm.PANEL_W * len(results), fm.PANEL_H), squeeze=False)
+    tags = "abc"
+    for i, (ax, res) in enumerate(zip(axes[0], results)):
         for v in "QKV":
             mid = res["per_view"][v][res["L"] // 2]
             s = mid["s"].numpy()
-            ax.plot(range(1, len(s) + 1), s / s[0], color=colours[v], lw=1.8, label=v)
+            fm.halo_line(ax, range(1, len(s) + 1), s / s[0], VIEW_COLOUR[v], label=v)
         ax.set_yscale("log")
-        ax.set_xlabel("singular value rank")
-        ax.set_title(res["model"], fontweight="bold")
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.grid(lw=0.4, alpha=0.3)
-    axes[0, 0].set_ylabel("singular value / max (middle layer)")
-    axes[0, 0].legend(frameon=False)
-    fig.savefig(OUT_FIG / "spectrum.png", dpi=200, facecolor="white", bbox_inches="tight")
-    fig.savefig(OUT_FIG / "spectrum.pdf", facecolor="white", bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", OUT_FIG / "spectrum.png")
+        ax.set_xlabel(f"Singular Value Rank ({res['model']})")
+        if i == 0:
+            ax.set_ylabel("Singular Value / Max")
+        fm.legend(ax)
+        fm.panel_tag(ax, f"({tags[i]})")
+    paths = fm.save(fig, OUT_FIG, "spectrum")
+    fm.write_how_to_read(
+        OUT_FIG, "spectrum",
+        how_to_read=(
+            "Each panel is one LLM. Each line is one projection (Q, K, V) at "
+            "that model's middle transformer layer: its singular values, "
+            "sorted largest to smallest, normalised by the largest one, on a "
+            "log y-axis. A line that stays near 1.0 across most of the "
+            "x-axis and only drops at the very end means the projection "
+            "preserves nearly all input directions; an early, steep drop "
+            "would mean most directions are discarded."
+        ),
+        interpretation=(
+            "; ".join(
+                f"{res['model']}: " + ", ".join(
+                    f"{v} min singular value {res['per_view'][v][res['L']//2]['s_min']:.2e}"
+                    f" of max {res['per_view'][v][res['L']//2]['s_max']:.2f}"
+                    for v in "QKV"
+                )
+                for res in results
+            )
+        ),
+    )
+    print("wrote", paths[0])
 
 
 def main():
@@ -113,6 +154,7 @@ def main():
         results.append(analyse(alias, path))
 
     write_table(results)
+    write_summary_table(results)
     fig_spectrum(results)
 
 

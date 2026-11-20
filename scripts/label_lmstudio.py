@@ -2,7 +2,7 @@
 # Standalone LM Studio judge for the label sheets from `detector.py label --mode export`; standard library only.
 # Same prompt, gold parsing, answer parsing, retries and failure handling as src/label/llm_judge.py (keep in sync).
 #
-#   python3 label_lmstudio.py --model <lm-studio-model-id> triviaqa_llama2_7b.csv [more.csv ...]
+#   python3 label_lmstudio.py --model <lm-studio-model-id> triviaqa_llama3.1_8b.csv [more.csv ...]
 #
 # Fills the sheet's label column in place (1 = hallucinated) and can be stopped and rerun: labeled rows are skipped.
 # Copy the filled sheets back to scripts/exports/label_sheets/ and run `detector.py label --mode export` to import.

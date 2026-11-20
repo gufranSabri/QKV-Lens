@@ -118,9 +118,8 @@ def truncate_runon(gen_ids: torch.Tensor, tokenizer) -> tuple[torch.Tensor, str]
     # decode) so the cut can't drift relative to what capture_all recorded.
     #
     # A leading newline or "Q:" (nothing real precedes it) is skipped rather
-    # than treated as a cut -- Llama-2-family base models routinely emit a
-    # leading newline with no run-on intent (confirmed case:
-    # truthfulqa/llama2_7b idx 432) -- the search resumes past it.
+    # than treated as a cut -- some base models routinely emit a leading
+    # newline with no run-on intent -- the search resumes past it.
     #
     # Returns (kept_ids, kept_text); unchanged (the whole response) if no
     # marker survives or the cut would leave nothing.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Train + evaluate one or more baselines on already-extracted features.
 
-    python run_training.py --config configs/coqa/llama2_7b.yaml
-    python run_training.py --config configs/coqa/llama2_7b.yaml --methods qkv-lens,hallushift
-    python run_training.py --config configs/coqa/llama2_7b.yaml --methods hallushift
+    python run_training.py --config configs/coqa/llama3.1_8b.yaml
+    python run_training.py --config configs/coqa/llama3.1_8b.yaml --methods qkv-lens,hallushift
+    python run_training.py --config configs/coqa/llama3.1_8b.yaml --methods hallushift
 
 Each method trains on its own already-extracted features with its own
 training code; this script only dispatches. qkv-lens always trains first

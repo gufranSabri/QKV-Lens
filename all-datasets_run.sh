@@ -13,7 +13,6 @@ DATASETS=(
 )
 
 MODELS=(
-    llama2_7b
     llama3.1_8b
     qwen2.5_7b
     opt_6.7b

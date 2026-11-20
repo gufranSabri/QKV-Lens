@@ -191,7 +191,7 @@ def _render(
     # column per token.
     import matplotlib.pyplot as plt
 
-    from scripts.figures import style_modern as fm
+    from scripts.figures import style as fm
 
     fm.apply()
     n_tokens = attribution.shape[0]
@@ -209,16 +209,22 @@ def _render(
             ax.imshow(attribution[t], cmap=fm.SEQUENTIAL, alpha=0.55, aspect="auto")
             ax.set_xticks([])
             ax.set_yticks([])
-            fm.strip_frame(ax, keep_bottom=False)
             if c == 0:
-                ax.set_title("prompt" if t < n_prompt else f"t{t - n_prompt}", fontsize=8, color=fm.INK)
+                ax.set_title("Prompt" if t < n_prompt else f"T{t - n_prompt}")
             if t == 0:
-                ax.set_ylabel(channel_names[c], fontsize=9, color=fm.INK_SOFT)
+                ax.set_ylabel(channel_names[c])
 
-    fm.title(
-        fig,
-        f"Integrated Gradients  —  {origin} example {idx}",
-        f"label={label} (1=hallucinated), p(hallucinated)={prob:.3f}; "
-        f"rows: channels of the field ({', '.join(channel_names)}), columns: tokens",
+    paths = fm.save(fig, dest.parent, dest.stem)
+    fm.write_how_to_read(
+        dest.parent, dest.stem,
+        how_to_read=(
+            "Rows are field channels "
+            f"({', '.join(channel_names)}); columns are tokens (prompt, "
+            "then generated tokens t0, t1, ...). Grayscale is the raw field "
+            "value; the overlaid colour is Integrated Gradients attribution."
+        ),
+        interpretation=(
+            f"{origin} example {idx}: label={label} (1=hallucinated), "
+            f"p(hallucinated)={prob:.3f}."
+        ),
     )
-    fm.save(fig, dest.parent, dest.stem)

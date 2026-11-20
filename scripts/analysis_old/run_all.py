@@ -2,7 +2,7 @@
 """Prefix-forecasting over the whole run grid, plus the pooled summary figure.
 
     python scripts/analysis/run_all.py                  # every run under runs/
-    python scripts/analysis/run_all.py llama2_7b_coqa   # just this one
+    python scripts/analysis/run_all.py llama3.1_8b_coqa   # just this one
     python scripts/analysis/run_all.py --limit 0        # the full held-out split
     python scripts/analysis/run_all.py --from-cache     # redraw, no GPU needed
 

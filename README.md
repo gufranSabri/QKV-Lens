@@ -123,7 +123,7 @@ from `extract.source`, `extract.pool` and `extract.n_segments`.
 
 ## Datasets and models
 
-TriviaQA, TruthfulQA, CoQA × LLaMA-2-7B, LLaMA-3.1-8B, OPT-6.7B, Qwen2.5-7B,
+TriviaQA, TruthfulQA, CoQA × LLaMA-3.1-8B, OPT-6.7B, Qwen2.5-7B,
 one config each under `configs/`.
 
 Labels default to an LLM judge (`labeling.scheme: llm_judge`, via Novita AI)
@@ -248,14 +248,14 @@ that already exists; `RERUN=1` redoes it all.
 
 | Step | What | Script |
 |---|---|---|
-| 0 | Extract TriviaQA × 4 LLMs with `--variants all`; TruthfulQA, CoQA default only; then label all of it | `detector.py extract`, `detector.py label` |
+| 0 | Extract TriviaQA × 3 LLMs with `--variants all`; TruthfulQA, CoQA default only; then label all of it | `detector.py extract`, `detector.py label` |
 | 1 | Hidden states vs Q/K/V linear probes (3 LLMs) | `scripts/analysis/hidden_vs_qkv.py` |
 | 2 | Component ablation (LLaMA-3.1-8B) | `component_ablation.sh` |
-| 3 | Representation ablation (4 LLMs), three stages: every Q/K/V channel combo at M=32 → pick the best combo; `hs` and `hsn` at M ∈ {8, 16, 32, 64, 128}; the best combo at M ∈ {8, 16, 64, 128} and with max/min pooling | `representation_ablation.sh` |
+| 3 | Representation ablation (3 LLMs), three stages: every Q/K/V channel combo at M=32 → pick the best combo; `hs` and `hsn` at M ∈ {8, 16, 32, 64, 128}; the best combo at M ∈ {8, 16, 64, 128} and with max/min pooling | `representation_ablation.sh` |
 | 4 | Collapse-axis ablation: average out M, L or channels | `collapse_axis_ablation.sh` |
 | 5 | Permutation ablation: shuffle L, M or both, 3 seeds | `permutation_ablation.sh` |
 | 6 | Tables for steps 2–5 | `scripts/tables/*.py` |
-| 7 | Main results (4 LLMs × 3 datasets) with the step-3 combo → baselines | `run_all_baselines.sh` |
+| 7 | Main results (3 LLMs × 3 datasets) with the step-3 combo → baselines | `run_all_baselines.sh` |
 | 8 | Significance, prototype maps, IG heatmap, forecasting | `scripts/analysis/`, `scripts/figures/` |
 | 9 | Digest | `scripts/analysis/ablation_summary.py` |
 

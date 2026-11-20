@@ -10,5 +10,12 @@ CONFIGS=(
     "qwen2.5_7b=configs/triviaqa/qwen2.5_7b.yaml"
 )
 
-python scripts/analysis/act1/spectral_rank.py --configs "${CONFIGS[@]}"
-python scripts/analysis/act1/probe_parity.py --configs "${CONFIGS[@]}" --n-examples 300
+# python scripts/analysis/act1/spectral_rank.py --configs "${CONFIGS[@]}"
+
+# Capture is GPU-bound and resumable (checkpoints per batch to
+# docs/act1_cache/*.partial.jsonl); re-running this same command after a
+# crash/preemption picks up where it left off. Probe is cache-only -- rerun
+# it alone (--stage probe) to retune the CV/bootstrap or replot without
+# touching the GPU again.
+python scripts/analysis/act1/probe_parity.py --configs "${CONFIGS[@]}" \
+    --n-examples 600 --batch-size 8 --stage all

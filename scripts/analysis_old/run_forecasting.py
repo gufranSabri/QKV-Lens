@@ -2,8 +2,8 @@
 """CLI: how early in a response can the detector call a hallucination? (one cell)
 
     python scripts/analysis/run_forecasting.py \\
-        --config configs/triviaqa/llama2_7b.yaml \\
-        --checkpoint runs/llama2_7b_triviaqa/best.pt
+        --config configs/triviaqa/llama3.1_8b.yaml \\
+        --checkpoint runs/llama3.1_8b_triviaqa/best.pt
 
 Runs the prefix sweep for ONE (LLM, dataset) cell and writes, under `docs/`:
 
